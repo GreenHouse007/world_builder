@@ -7,45 +7,31 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { User } from 'firebase/auth';
 
 import { loadFirebase } from '@/lib/firebase/client';
-
-type CollaboratorRole = 'Owner' | 'Editor' | 'Viewer';
-
-type WorldCollaborator = {
-  id: string;
-  name: string;
-  email: string;
-  role: CollaboratorRole;
-  avatarColor: string;
-};
-
-type ActivityAction = 'create' | 'update' | 'duplicate' | 'delete' | 'move' | 'share';
-
-type ActivityEntry = {
-  id: string;
-  action: ActivityAction;
-  target: string;
-  context?: string;
-  actorId: string;
-  actorName: string;
-  timestamp: string;
-};
-
-type PageNode = {
-  id: string;
-  title: string;
-  content: string;
-  favorite: boolean;
-  children: PageNode[];
-};
-
-type World = {
-  id: string;
-  name: string;
-  pages: PageNode[];
-  ownerId: string;
-  collaborators: WorldCollaborator[];
-  activity: ActivityEntry[];
-};
+import {
+  ACTIVITY_LIMIT,
+  ActivityAction,
+  ActivityEntry,
+  CollaboratorRole,
+  PageNode,
+  World,
+  WorldCollaborator,
+  generateId,
+  getAvatarColor,
+  initialWorlds,
+} from '@/lib/models/worldTypes';
+import {
+  addPageToTree,
+  clonePageTree,
+  createPage,
+  findPageInTree,
+  flattenPages,
+  insertPageAfter,
+  isDescendant,
+  movePageBefore,
+  removePageFromTree,
+  updatePageInTree,
+} from '@/lib/models/pageTree';
+import { WorldChange, applyWorldChanges, buildPageChange } from '@/lib/models/worldChanges';
 
 type FirebaseBundle = NonNullable<Awaited<ReturnType<typeof loadFirebase>>>;
 
@@ -108,22 +94,6 @@ const templates = [
     blurb: 'Structure quests and branching encounters for tabletop sessions.',
   },
 ];
-
-const STORAGE_KEY = 'enfield-worlds';
-const ACTIVITY_LIMIT = 40;
-
-const AVATAR_COLORS = ['#6366f1', '#38bdf8', '#f472b6', '#f97316', '#22d3ee', '#34d399', '#eab308'];
-
-const hashString = (value: string) => {
-  let hash = 0;
-  for (let index = 0; index < value.length; index += 1) {
-    hash = (hash << 5) - hash + value.charCodeAt(index);
-    hash |= 0;
-  }
-  return Math.abs(hash);
-};
-
-const getAvatarColor = (seed: string) => AVATAR_COLORS[hashString(seed || 'enfield')] ?? AVATAR_COLORS[0];
 
 const toTitleCase = (value: string) =>
   value
@@ -307,406 +277,69 @@ const normalizeWorlds = (worlds: Partial<World>[]): World[] =>
     };
   });
 
-const loadWorldsFromStorage = (): World[] => {
-  if (typeof window !== 'undefined') {
-    const stored = window.localStorage.getItem(STORAGE_KEY);
-    if (stored) {
-      try {
-        const parsed = JSON.parse(stored) as World[];
-        if (Array.isArray(parsed)) {
-          return normalizeWorlds(parsed);
-        }
-      } catch (error) {
-        console.warn('Unable to parse stored worlds, falling back to defaults.', error);
-      }
-    }
-  }
-
-  return normalizeWorlds(initialWorlds);
+type CachedState = {
+  worlds: World[];
+  pendingChanges: WorldChange[];
+  timestamp: number;
 };
 
-const initialWorlds: World[] = [
-  {
-    id: 'world-aerie',
-    name: 'The Aerie Chronicles',
-    ownerId: 'user-celeste',
-    collaborators: [
-      {
-        id: 'user-celeste',
-        name: 'Celeste Mira',
-        email: 'celeste@enfield.studio',
-        role: 'Owner',
-        avatarColor: getAvatarColor('user-celeste'),
-      },
-      {
-        id: 'user-jalen',
-        name: 'Jalen Orin',
-        email: 'jalen@enfield.studio',
-        role: 'Editor',
-        avatarColor: getAvatarColor('user-jalen'),
-      },
-      {
-        id: 'user-sera',
-        name: 'Sera Kith',
-        email: 'sera@enfield.studio',
-        role: 'Viewer',
-        avatarColor: getAvatarColor('user-sera'),
-      },
-    ],
-    activity: [
-      {
-        id: 'activity-aerie-1',
-        action: 'update',
-        target: 'Lore bible',
-        context: 'Jalen refined the seasonal rituals section.',
-        actorId: 'user-jalen',
-        actorName: 'Jalen Orin',
-        timestamp: '2024-10-04T14:22:00.000Z',
-      },
-      {
-        id: 'activity-aerie-2',
-        action: 'move',
-        target: 'Enfield myths',
-        context: 'Celeste reorganized the myth sub-pages.',
-        actorId: 'user-celeste',
-        actorName: 'Celeste Mira',
-        timestamp: '2024-10-02T17:45:00.000Z',
-      },
-      {
-        id: 'activity-aerie-3',
-        action: 'create',
-        target: 'Skyward Choir',
-        context: 'Sera proposed a new faction entry.',
-        actorId: 'user-sera',
-        actorName: 'Sera Kith',
-        timestamp: '2024-09-27T09:05:00.000Z',
-      },
-    ],
-    pages: [
-      {
-        id: 'page-overview',
-        title: 'World overview',
-        content:
-          'A windswept archipelago held aloft by luminous crystals. The fox-winged Enfield guides dreamers between islands where forgotten gods still whisper.',
-        favorite: false,
-        children: [
-          {
-            id: 'page-lore-bible',
-            title: 'Lore bible',
-            content:
-              'Foundational myths, seasonal rituals, and the Enfield creation story. Document how the winged fox chose its heralds.',
-            favorite: false,
-            children: [
-              {
-                id: 'page-enfield-myths',
-                title: 'Enfield myths',
-                content: 'Legends collected from temple murals and sky-ship sailors.',
-                favorite: false,
-                children: [],
-              },
-            ],
-          },
-          {
-            id: 'page-factions',
-            title: 'Factions',
-            content: 'The Skyward Choir, the Crystal Veil, and clandestine cartographers.',
-            favorite: false,
-            children: [
-              {
-                id: 'page-choir',
-                title: 'Skyward Choir',
-                content: 'A chorus of mystics who map the winds with song.',
-                favorite: false,
-                children: [],
-              },
-            ],
-          },
-        ],
-      },
-      {
-        id: 'page-characters',
-        title: 'Characters',
-        content: 'Profiles for protagonists, antagonists, and pivotal supporting casts.',
-        favorite: false,
-        children: [
-          {
-            id: 'page-protagonists',
-            title: 'Protagonists',
-            content: 'Heroic figures tied to the Enfield lineage.',
-            favorite: false,
-            children: [],
-          },
-        ],
-      },
-      {
-        id: 'page-locations',
-        title: 'Locations',
-        content: 'Document each floating isle, climate, and cultural artifact.',
-        favorite: false,
-        children: [],
-      },
-    ],
-  },
-  {
-    id: 'world-seabound',
-    name: 'Seabound Requiem',
-    ownerId: 'user-naila',
-    collaborators: [
-      {
-        id: 'user-naila',
-        name: 'Naila Crest',
-        email: 'naila@enfield.studio',
-        role: 'Owner',
-        avatarColor: getAvatarColor('user-naila'),
-      },
-      {
-        id: 'user-kael',
-        name: 'Kael Rowe',
-        email: 'kael@enfield.studio',
-        role: 'Editor',
-        avatarColor: getAvatarColor('user-kael'),
-      },
-    ],
-    activity: [
-      {
-        id: 'activity-sea-1',
-        action: 'create',
-        target: 'Tidebinding rites',
-        context: 'Kael outlined the mage initiation ceremony.',
-        actorId: 'user-kael',
-        actorName: 'Kael Rowe',
-        timestamp: '2024-10-01T12:18:00.000Z',
-      },
-      {
-        id: 'activity-sea-2',
-        action: 'update',
-        target: 'World overview',
-        context: 'Naila updated the opening synopsis.',
-        actorId: 'user-naila',
-        actorName: 'Naila Crest',
-        timestamp: '2024-09-29T08:52:00.000Z',
-      },
-    ],
-    pages: [
-      {
-        id: 'page-sea-overview',
-        title: 'World overview',
-        content: 'A storm-lashed oceanic realm ruled by tide-binding mages.',
-        favorite: false,
-        children: [],
-      },
-    ],
-  },
-];
+const CACHE_STORAGE_KEY = 'enfield-worlds-cache-v2';
 
-const createPage = (title = 'Untitled page'): PageNode => ({
-  id: generateId('page'),
-  title,
-  content: '',
-  favorite: false,
-  children: [],
-});
+const loadCachedState = (): CachedState | null => {
+  if (typeof window === 'undefined') return null;
 
-const addPageToTree = (nodes: PageNode[], parentId: string | null, newPage: PageNode): PageNode[] => {
-  if (!parentId) {
-    return [...nodes, newPage];
+  try {
+    const stored = window.localStorage.getItem(CACHE_STORAGE_KEY);
+    if (!stored) return null;
+
+    const parsed = JSON.parse(stored) as Partial<CachedState> & { worlds?: Partial<World>[] };
+    if (!Array.isArray(parsed?.worlds)) {
+      return null;
+    }
+
+    return {
+      worlds: normalizeWorlds(parsed.worlds as World[]),
+      pendingChanges: Array.isArray(parsed.pendingChanges)
+        ? (parsed.pendingChanges as WorldChange[])
+        : [],
+      timestamp: typeof parsed.timestamp === 'number' ? parsed.timestamp : Date.now(),
+    };
+  } catch (error) {
+    console.warn('Unable to read cached worlds.', error);
+    return null;
   }
-
-  let changed = false;
-  const nextNodes = nodes.map((node) => {
-    if (node.id === parentId) {
-      changed = true;
-      return { ...node, children: [...node.children, newPage] };
-    }
-
-    const updatedChildren = addPageToTree(node.children, parentId, newPage);
-    if (updatedChildren !== node.children) {
-      changed = true;
-      return { ...node, children: updatedChildren };
-    }
-
-    return node;
-  });
-
-  return changed ? nextNodes : nodes;
 };
 
-const updatePageInTree = (
-  nodes: PageNode[],
-  pageId: string,
-  updater: (page: PageNode) => PageNode,
-): PageNode[] => {
-  let changed = false;
-  const nextNodes = nodes.map((node) => {
-    if (node.id === pageId) {
-      changed = true;
-      return updater(node);
-    }
+const saveCachedState = (worlds: World[], pendingChanges: WorldChange[]) => {
+  if (typeof window === 'undefined') return;
 
-    const updatedChildren = updatePageInTree(node.children, pageId, updater);
-    if (updatedChildren !== node.children) {
-      changed = true;
-      return { ...node, children: updatedChildren };
-    }
+  const payload: CachedState = {
+    worlds,
+    pendingChanges,
+    timestamp: Date.now(),
+  };
 
-    return node;
-  });
-
-  return changed ? nextNodes : nodes;
+  try {
+    window.localStorage.setItem(CACHE_STORAGE_KEY, JSON.stringify(payload));
+  } catch (error) {
+    console.warn('Unable to persist worlds cache.', error);
+  }
 };
 
-const removePageFromTree = (nodes: PageNode[], pageId: string): { nodes: PageNode[]; removed: PageNode | null } => {
-  let removed: PageNode | null = null;
-  let changed = false;
-  const nextNodes: PageNode[] = [];
-
-  for (const node of nodes) {
-    if (removed) {
-      nextNodes.push(node);
-      continue;
-    }
-
-    if (node.id === pageId) {
-      removed = node;
-      changed = true;
-      continue;
-    }
-
-    const result = removePageFromTree(node.children, pageId);
-    if (result.removed) {
-      removed = result.removed;
-      changed = true;
-      nextNodes.push({ ...node, children: result.nodes });
-    } else {
-      nextNodes.push(node);
-    }
-  }
-
-  return { nodes: changed ? nextNodes : nodes, removed };
-};
-
-const insertPageBefore = (
-  nodes: PageNode[],
-  targetId: string,
-  page: PageNode,
-): { nodes: PageNode[]; inserted: boolean } => {
-  let inserted = false;
-  const nextNodes: PageNode[] = [];
-
-  for (const node of nodes) {
-    if (!inserted && node.id === targetId) {
-      nextNodes.push(page);
-      nextNodes.push(node);
-      inserted = true;
-      continue;
-    }
-
-    const result = insertPageBefore(node.children, targetId, page);
-    if (result.inserted) {
-      nextNodes.push({ ...node, children: result.nodes });
-      inserted = true;
-    } else {
-      nextNodes.push(node);
-    }
-  }
-
-  return { nodes: inserted ? nextNodes : nodes, inserted };
-};
-
-const insertPageAfter = (
-  nodes: PageNode[],
-  targetId: string,
-  page: PageNode,
-): { nodes: PageNode[]; inserted: boolean } => {
-  let inserted = false;
-  const nextNodes: PageNode[] = [];
-
-  for (const node of nodes) {
-    if (!inserted && node.id === targetId) {
-      nextNodes.push(node);
-      nextNodes.push(page);
-      inserted = true;
-      continue;
-    }
-
-    const result = insertPageAfter(node.children, targetId, page);
-    if (result.inserted) {
-      nextNodes.push({ ...node, children: result.nodes });
-      inserted = true;
-    } else {
-      nextNodes.push(node);
-    }
-  }
-
-  return { nodes: inserted ? nextNodes : nodes, inserted };
-};
-
-const movePageBefore = (nodes: PageNode[], sourceId: string, targetId: string): PageNode[] => {
-  if (sourceId === targetId) return nodes;
-
-  const removal = removePageFromTree(nodes, sourceId);
-  if (!removal.removed) {
-    return nodes;
-  }
-
-  const insertion = insertPageBefore(removal.nodes, targetId, removal.removed);
-  if (insertion.inserted) {
-    return insertion.nodes;
-  }
-
-  const fallbackInsertion = insertPageBefore(removal.nodes, sourceId, removal.removed);
-  if (fallbackInsertion.inserted) {
-    return fallbackInsertion.nodes;
-  }
-
-  return [...removal.nodes, removal.removed];
-};
-
-const pageContainsId = (node: PageNode, pageId: string): boolean => {
-  if (node.id === pageId) {
-    return true;
-  }
-
-  return node.children.some((child) => pageContainsId(child, pageId));
-};
-
-const isDescendant = (nodes: PageNode[], ancestorId: string, descendantId: string): boolean => {
-  const ancestor = findPageInTree(nodes, ancestorId);
-  if (!ancestor) {
-    return false;
-  }
-
-  return ancestor.children.some((child) => pageContainsId(child, descendantId));
-};
-
-const flattenPages = (nodes: PageNode[]): PageNode[] =>
-  nodes.flatMap((node) => [node, ...flattenPages(node.children)]);
-
-const findPageInTree = (nodes: PageNode[], pageId: string | null): PageNode | null => {
-  if (!pageId) return null;
-
+const findParentId = (nodes: PageNode[], pageId: string, parentId: string | null = null): string | null => {
   for (const node of nodes) {
     if (node.id === pageId) {
-      return node;
+      return parentId;
     }
 
-    if (node.children.length) {
-      const found = findPageInTree(node.children, pageId);
-      if (found) return found;
+    const candidate = findParentId(node.children, pageId, node.id);
+    if (candidate) {
+      return candidate;
     }
   }
 
   return null;
 };
-
-const clonePageTree = (nodes: PageNode[]): PageNode[] =>
-  nodes.map((node) => ({
-    id: generateId('page'),
-    title: node.title,
-    content: node.content,
-    favorite: node.favorite ?? false,
-    children: clonePageTree(node.children),
-  }));
 
 type PageTreeProps = {
   nodes: PageNode[];
@@ -731,6 +364,8 @@ type PageTreeProps = {
   onDrop: (targetId: string) => void;
   draggedPageId: string | null;
   depth?: number;
+  collapsedIds: string[];
+  onToggleCollapse: (id: string) => void;
 };
 function PageTree({
   nodes,
@@ -755,6 +390,8 @@ function PageTree({
   onDrop,
   draggedPageId,
   depth = 0,
+  collapsedIds,
+  onToggleCollapse,
 }: PageTreeProps) {
   return (
     <ul className={depth === 0 ? 'space-y-1.5' : 'space-y-1.5 border-l border-white/5 pl-4'}>
@@ -765,6 +402,7 @@ function PageTree({
         const isMenuOpen = actionMenuId === node.id;
         const isFavorite = node.favorite;
         const isDragging = draggedPageId === node.id;
+        const isCollapsed = collapsedIds.includes(node.id);
 
         return (
           <li key={node.id} className="relative space-y-1">
@@ -789,14 +427,37 @@ function PageTree({
               }}
               onDragEnd={onDragEnd}
             >
-              <span
-                className={`flex h-6 w-6 items-center justify-center rounded-lg border border-transparent text-xs ${
-                  hasChildren ? 'text-indigo-200/80' : 'text-slate-400'
-                }`}
-                aria-hidden="true"
-              >
-                {hasChildren ? '◈' : '•'}
-              </span>
+              {hasChildren ? (
+                <button
+                  type="button"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onToggleCollapse(node.id);
+                  }}
+                  onMouseDown={(event) => event.stopPropagation()}
+                  onPointerDown={(event) => event.stopPropagation()}
+                  className={`inline-flex h-6 w-6 items-center justify-center rounded-lg border border-white/10 text-xs transition ${
+                    isCollapsed ? 'text-slate-400 hover:text-slate-200' : 'text-indigo-200/80 hover:text-indigo-100'
+                  }`}
+                  aria-label={`${isCollapsed ? 'Expand' : 'Collapse'} ${node.title}`}
+                  aria-expanded={!isCollapsed}
+                >
+                  <svg aria-hidden="true" viewBox="0 0 20 20" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.5">
+                    {isCollapsed ? (
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M8 6.5 12 10l-4 3.5" />
+                    ) : (
+                      <path strokeLinecap="round" strokeLinejoin="round" d="m6.5 8.5 3.5 3.5 3.5-3.5" />
+                    )}
+                  </svg>
+                </button>
+              ) : (
+                <span
+                  className="flex h-6 w-6 items-center justify-center rounded-lg border border-transparent text-xs text-slate-400"
+                  aria-hidden="true"
+                >
+                  •
+                </span>
+              )}
 
               <button
                 type="button"
@@ -918,7 +579,7 @@ function PageTree({
               </div>
             ) : null}
 
-            {hasChildren ? (
+            {hasChildren && !isCollapsed ? (
               <div className="pt-1">
                 <PageTree
                   nodes={node.children}
@@ -943,6 +604,8 @@ function PageTree({
                   onDrop={onDrop}
                   draggedPageId={draggedPageId}
                   depth={depth + 1}
+                  collapsedIds={collapsedIds}
+                  onToggleCollapse={onToggleCollapse}
                 />
               </div>
             ) : null}
@@ -986,7 +649,7 @@ export default function Home() {
   const [authName, setAuthName] = useState('');
   const [authError, setAuthError] = useState<string | null>(null);
   const [authSubmitting, setAuthSubmitting] = useState(false);
-  const initialWorldsRef = useRef<World[]>(loadWorldsFromStorage());
+  const initialWorldsRef = useRef<World[]>(normalizeWorlds(initialWorlds));
   const [worlds, setWorlds] = useState<World[]>(initialWorldsRef.current);
   const [activeWorldId, setActiveWorldId] = useState<string>(initialWorldsRef.current[0]?.id ?? '');
   const [selectedPageId, setSelectedPageId] = useState<string | null>(null);
@@ -1009,13 +672,101 @@ export default function Home() {
   const [isLightMode, setIsLightMode] = useState(false);
   const [isExportMenuOpen, setIsExportMenuOpen] = useState(false);
   const [selectedExportPageIds, setSelectedExportPageIds] = useState<string[]>([]);
-  const [saveStatus, setSaveStatus] = useState<'saved' | 'saving' | 'offline' | 'syncing'>('saved');
-  const saveTimerRef = useRef<number | null>(null);
-  const pendingSaveRef = useRef(false);
+  const [collapsedPageIds, setCollapsedPageIds] = useState<string[]>([]);
+  const [saveStatus, setSaveStatus] = useState<'saved' | 'saving' | 'offline' | 'syncing'>('syncing');
   const [isOnline, setIsOnline] = useState(true);
-  const isFirstSaveRef = useRef(true);
   const exportMenuRef = useRef<HTMLDivElement | null>(null);
   const previousRootIdsRef = useRef<string[]>([]);
+  const worldsRef = useRef(worlds);
+  const pendingChangesRef = useRef<WorldChange[]>([]);
+  const flushTimerRef = useRef<number | null>(null);
+
+  const commitWorldsUpdate = useCallback(
+    (updater: World[] | ((previous: World[]) => World[])) => {
+      if (typeof updater === 'function') {
+        setWorlds((previous) => {
+          const nextWorlds = (updater as (prev: World[]) => World[])(previous);
+          worldsRef.current = nextWorlds;
+          saveCachedState(nextWorlds, pendingChangesRef.current);
+          return nextWorlds;
+        });
+      } else {
+        const nextWorlds = updater;
+        worldsRef.current = nextWorlds;
+        saveCachedState(nextWorlds, pendingChangesRef.current);
+        setWorlds(nextWorlds);
+      }
+    },
+    [],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    const cached = loadCachedState();
+
+    if (cached && cached.worlds.length) {
+      pendingChangesRef.current = cached.pendingChanges;
+      commitWorldsUpdate(cached.worlds);
+      setActiveWorldId((previous) => (previous && cached.worlds.some((world) => world.id === previous)
+        ? previous
+        : cached.worlds[0]?.id ?? ''));
+      setSaveStatus(cached.pendingChanges.length ? 'offline' : 'saved');
+    }
+
+    const fetchWorlds = async () => {
+      try {
+        const response = await fetch('/api/worlds/sync', { cache: 'no-store' });
+        if (!response.ok) {
+          throw new Error('Failed to load worlds from server');
+        }
+
+        const payload = await response.json();
+        const serverWorlds = normalizeWorlds((payload?.data ?? []) as World[]);
+        const merged = pendingChangesRef.current.length
+          ? applyWorldChanges(serverWorlds, pendingChangesRef.current)
+          : serverWorlds;
+
+        if (cancelled) return;
+
+        commitWorldsUpdate(merged);
+        setActiveWorldId((previous) =>
+          previous && merged.some((world) => world.id === previous)
+            ? previous
+            : merged[0]?.id ?? '',
+        );
+        saveCachedState(merged, pendingChangesRef.current);
+        setSaveStatus(pendingChangesRef.current.length ? 'saving' : 'saved');
+      } catch (error) {
+        console.warn('Unable to load worlds from server.', error);
+        if (cancelled) return;
+
+        if (!cached || !cached.worlds.length) {
+          const fallback = normalizeWorlds(initialWorlds);
+          pendingChangesRef.current = [];
+          commitWorldsUpdate(fallback);
+          setActiveWorldId(fallback[0]?.id ?? '');
+          saveCachedState(fallback, []);
+        }
+        
+        setSaveStatus(pendingChangesRef.current.length ? 'offline' : 'saved');
+      }
+    };
+
+    fetchWorlds();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [commitWorldsUpdate]);
+
+  useEffect(() => {
+    return () => {
+      if (flushTimerRef.current) {
+        window.clearTimeout(flushTimerRef.current);
+        flushTimerRef.current = null;
+      }
+    };
+  }, []);
 
   const getCurrentUserCollaborator = useCallback(
     (role: CollaboratorRole = 'Owner'): WorldCollaborator => {
@@ -1070,6 +821,81 @@ export default function Home() {
   );
 
   const currentUser = useMemo(() => getCurrentUserCollaborator(), [getCurrentUserCollaborator]);
+
+  const flushPendingChanges = useCallback(async () => {
+    if (!pendingChangesRef.current.length) {
+      setSaveStatus('saved');
+      return;
+    }
+
+    if (!isOnline) {
+      setSaveStatus('offline');
+      return;
+    }
+
+    const batch = [...pendingChangesRef.current];
+    setSaveStatus('syncing');
+
+    try {
+      const response = await fetch('/api/worlds/sync', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ changes: batch }),
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to sync changes');
+      }
+
+      const payload = await response.json();
+      const serverWorlds = normalizeWorlds((payload?.data ?? []) as World[]);
+
+      pendingChangesRef.current = [];
+      commitWorldsUpdate(serverWorlds);
+      setActiveWorldId((previous) =>
+        previous && serverWorlds.some((world) => world.id === previous)
+          ? previous
+          : serverWorlds[0]?.id ?? '',
+      );
+      setSelectedPageId((previous) => {
+        if (!previous) return previous;
+        const exists = serverWorlds.some((world) => findPageInTree(world.pages, previous));
+        return exists ? previous : null;
+      });
+      saveCachedState(serverWorlds, []);
+      setSaveStatus('saved');
+    } catch (error) {
+      console.error('World sync failed.', error);
+      pendingChangesRef.current = [...batch, ...pendingChangesRef.current];
+      setSaveStatus('offline');
+    }
+  }, [commitWorldsUpdate, isOnline]);
+
+  const queueChanges = useCallback(
+    (changes: WorldChange[]) => {
+      if (!changes.length) return;
+
+      pendingChangesRef.current = [...pendingChangesRef.current, ...changes];
+      saveCachedState(worldsRef.current, pendingChangesRef.current);
+      setSaveStatus(isOnline ? 'saving' : 'offline');
+
+      if (flushTimerRef.current) {
+        window.clearTimeout(flushTimerRef.current);
+      }
+
+      flushTimerRef.current = window.setTimeout(() => {
+        flushTimerRef.current = null;
+        void flushPendingChanges();
+      }, 800);
+    },
+    [flushPendingChanges, isOnline],
+  );
+
+  useEffect(() => {
+    if (isOnline && pendingChangesRef.current.length) {
+      void flushPendingChanges();
+    }
+  }, [isOnline, flushPendingChanges]);
 
   useEffect(() => {
     let isMounted = true;
@@ -1193,12 +1019,6 @@ export default function Home() {
   );
   const activityEntries = activeWorld?.activity ?? [];
 
-  const persistWorlds = useCallback(async () => {
-    if (typeof window === 'undefined') return;
-
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(worlds));
-  }, [worlds]);
-
   const syncStatusLabel = useMemo(() => {
     switch (saveStatus) {
       case 'saving':
@@ -1266,48 +1086,6 @@ export default function Home() {
     }
   }, [currentPageId, currentPageContent]);
 
-  useEffect(() => {
-    if (isFirstSaveRef.current) {
-      isFirstSaveRef.current = false;
-      return;
-    }
-
-    if (!isOnline) {
-      setSaveStatus('offline');
-      pendingSaveRef.current = true;
-      return;
-    }
-
-    setSaveStatus('saving');
-
-    if (saveTimerRef.current) {
-      window.clearTimeout(saveTimerRef.current);
-    }
-
-    saveTimerRef.current = window.setTimeout(async () => {
-      await persistWorlds();
-      setSaveStatus('saved');
-      pendingSaveRef.current = false;
-      saveTimerRef.current = null;
-    }, 1200);
-
-    return () => {
-      if (saveTimerRef.current) {
-        window.clearTimeout(saveTimerRef.current);
-        saveTimerRef.current = null;
-      }
-    };
-  }, [worlds, isOnline, persistWorlds]);
-
-  useEffect(() => {
-    if (isOnline && pendingSaveRef.current) {
-      setSaveStatus('syncing');
-      persistWorlds().then(() => {
-        pendingSaveRef.current = false;
-        setSaveStatus('saved');
-      });
-    }
-  }, [isOnline, persistWorlds]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -1359,7 +1137,7 @@ export default function Home() {
     });
 
     previousRootIdsRef.current = currentRootIds;
-  }, [activeWorldId, rootPageIdSignature]);
+  }, [activeWorld, activeWorldId, rootPageIdSignature]);
 
   useEffect(() => {
     if (!isExportMenuOpen) return;
@@ -1403,13 +1181,15 @@ export default function Home() {
     setPageTitleDraft('');
     setDraggedPageId(null);
     setShareMenuWorldId(null);
+    setCollapsedPageIds([]);
   };
 
   const handleCreateWorld = () => {
     const count = worlds.length + 1;
     const newWorld = createEmptyWorld(`New World ${count}`);
 
-    setWorlds((prev) => [...prev, newWorld]);
+    commitWorldsUpdate((prev) => [...prev, newWorld]);
+    queueChanges([{ type: 'createWorld', world: newWorld }]);
     setActiveWorldId(newWorld.id);
     setSelectedPageId(null);
     setView('dashboard');
@@ -1417,6 +1197,7 @@ export default function Home() {
     setWorldActionMenuId(null);
     setEditingWorldId(newWorld.id);
     setWorldNameDraft(newWorld.name);
+    setCollapsedPageIds([]);
   };
 
   const handleAddPage = (parentId?: string) => {
@@ -1429,7 +1210,11 @@ export default function Home() {
       newPage.title,
       parentTitle ? `Added beneath “${parentTitle}”` : 'Added to the index',
     );
-    setWorlds((prev) =>
+    if (parentId) {
+      setCollapsedPageIds((prev) => prev.filter((id) => id !== parentId));
+    }
+
+    commitWorldsUpdate((prev) =>
       prev.map((world) =>
         world.id === activeWorld.id
           ? {
@@ -1440,6 +1225,10 @@ export default function Home() {
           : world,
       ),
     );
+    queueChanges([
+      { type: 'insertPage', worldId: activeWorld.id, parentId: parentId ?? null, page: newPage },
+      { type: 'appendActivity', worldId: activeWorld.id, entries: [activityEntry] },
+    ]);
 
     setSelectedPageId(newPage.id);
     setView('page');
@@ -1457,9 +1246,10 @@ export default function Home() {
     if (!editingWorldId) return;
 
     const nextName = worldNameDraft.trim() || 'Untitled world';
-    setWorlds((prev) =>
+    commitWorldsUpdate((prev) =>
       prev.map((world) => (world.id === editingWorldId ? { ...world, name: nextName } : world)),
     );
+    queueChanges([{ type: 'updateWorld', worldId: editingWorldId, data: { name: nextName } }]);
     setEditingWorldId(null);
     setWorldNameDraft('');
   };
@@ -1484,7 +1274,8 @@ export default function Home() {
       ),
     };
 
-    setWorlds((prev) => [...prev, duplicate]);
+    commitWorldsUpdate((prev) => [...prev, duplicate]);
+    queueChanges([{ type: 'createWorld', world: duplicate }]);
     setActiveWorldId(duplicate.id);
     setSelectedPageId(null);
     setView('dashboard');
@@ -1492,6 +1283,7 @@ export default function Home() {
     setWorldActionMenuId(null);
     setEditingWorldId(duplicate.id);
     setWorldNameDraft(copyName);
+    setCollapsedPageIds([]);
   };
 
   const handleDeleteWorld = (worldId: string) => {
@@ -1503,11 +1295,12 @@ export default function Home() {
       }
     }
 
-    setWorlds((prev) => {
+    let fallbackWorld: World | null = null;
+    commitWorldsUpdate((prev) => {
       const remaining = prev.filter((world) => world.id !== worldId);
 
       if (remaining.length === 0) {
-        const fallbackWorld = createEmptyWorld('Untitled world');
+        fallbackWorld = createEmptyWorld('Untitled world');
         setActiveWorldId(fallbackWorld.id);
         setSelectedPageId(null);
         setView('dashboard');
@@ -1526,12 +1319,20 @@ export default function Home() {
 
       return remaining;
     });
+    const changes: WorldChange[] = [{ type: 'deleteWorld', worldId }];
+    if (fallbackWorld) {
+      changes.push({ type: 'createWorld', world: fallbackWorld });
+    }
+    queueChanges(changes);
 
     setWorldActionMenuId(null);
     setIsWorldMenuOpen(false);
     setEditingWorldId(null);
     setWorldNameDraft('');
     setShareMenuWorldId(null);
+    if (worldId === activeWorldId || fallbackWorld) {
+      setCollapsedPageIds([]);
+    }
   };
 
   const handleOpenPageMenu = (pageId: string) => {
@@ -1566,7 +1367,7 @@ export default function Home() {
       ? buildActivityEntry('update', nextTitle, `Renamed from “${previousTitle}”`)
       : null;
 
-    setWorlds((prev) =>
+    commitWorldsUpdate((prev) =>
       prev.map((world) =>
         world.id === activeWorld.id
           ? {
@@ -1580,6 +1381,13 @@ export default function Home() {
           : world,
       ),
     );
+    const renameChanges: WorldChange[] = [
+      { type: 'updatePage', worldId: activeWorld.id, pageId: editingPageId, data: { title: nextTitle } },
+    ];
+    if (renameEntry) {
+      renameChanges.push({ type: 'appendActivity', worldId: activeWorld.id, entries: [renameEntry] });
+    }
+    queueChanges(renameChanges);
 
     if (editingPageId === currentPageId) {
       setEditorTitle(nextTitle);
@@ -1599,7 +1407,10 @@ export default function Home() {
   };
 
   const handleRemoveCollaborator = (worldId: string, collaboratorId: string) => {
-    setWorlds((prev) =>
+    let collaboratorsAfterRemoval: WorldCollaborator[] | null = null;
+    let removalEntry: ActivityEntry | null = null;
+
+    commitWorldsUpdate((prev) =>
       prev.map((world) => {
         if (world.id !== worldId) {
           return world;
@@ -1614,21 +1425,32 @@ export default function Home() {
           return world;
         }
 
-        const removalEntry = buildActivityEntry('share', collaborator.name, 'Removed from shared access');
+        removalEntry = buildActivityEntry('share', collaborator.name, 'Removed from shared access');
+        collaboratorsAfterRemoval = world.collaborators.filter((member) => member.id !== collaboratorId);
 
         return {
           ...world,
-          collaborators: world.collaborators.filter((member) => member.id !== collaboratorId),
+          collaborators: collaboratorsAfterRemoval,
           activity: appendActivity(world.activity, removalEntry),
         };
       }),
     );
+
+    if (collaboratorsAfterRemoval) {
+      const changes: WorldChange[] = [
+        { type: 'setCollaborators', worldId, collaborators: collaboratorsAfterRemoval },
+      ];
+      if (removalEntry) {
+        changes.push({ type: 'appendActivity', worldId, entries: [removalEntry] });
+      }
+      queueChanges(changes);
+    }
   };
 
   const handleToggleFavorite = (pageId: string) => {
     if (!activeWorld) return;
 
-    setWorlds((prev) =>
+    commitWorldsUpdate((prev) =>
       prev.map((world) =>
         world.id === activeWorld.id
           ? {
@@ -1641,6 +1463,9 @@ export default function Home() {
           : world,
       ),
     );
+    const page = findPageInTree(activeWorld.pages, pageId);
+    const nextFavorite = !(page?.favorite ?? false);
+    queueChanges([buildPageChange(activeWorld.id, pageId, { favorite: nextFavorite })]);
   };
 
   const handleCopyPageLink = (pageId: string) => {
@@ -1674,8 +1499,13 @@ export default function Home() {
       children: clonePageTree(sourcePage.children),
     };
     const duplicateEntry = buildActivityEntry('duplicate', duplicateTitle, `Copied from “${sourcePage.title}”`);
+    const duplicateParentId = findParentId(activeWorld.pages, pageId);
 
-    setWorlds((prev) =>
+    if (duplicateParentId) {
+      setCollapsedPageIds((prev) => prev.filter((id) => id !== duplicateParentId));
+    }
+
+    commitWorldsUpdate((prev) =>
       prev.map((world) => {
         if (world.id !== activeWorld.id) {
           return world;
@@ -1689,6 +1519,10 @@ export default function Home() {
         };
       }),
     );
+    queueChanges([
+      { type: 'insertPage', worldId: activeWorld.id, parentId: duplicateParentId, page: duplicatePage },
+      { type: 'appendActivity', worldId: activeWorld.id, entries: [duplicateEntry] },
+    ]);
 
     setSelectedPageId(duplicatePage.id);
     setView('page');
@@ -1696,6 +1530,12 @@ export default function Home() {
     setPageActionMenuId(null);
     setEditingPageId(null);
     setPageTitleDraft('');
+  };
+
+  const handleToggleCollapse = (pageId: string) => {
+    setCollapsedPageIds((prev) =>
+      prev.includes(pageId) ? prev.filter((id) => id !== pageId) : [...prev, pageId],
+    );
   };
 
   const handleDeletePage = (pageId: string) => {
@@ -1721,7 +1561,19 @@ export default function Home() {
         : 'Removed the page from the index',
     );
 
-    setWorlds((prev) =>
+    setCollapsedPageIds((prev) => {
+      const collectIds = (node: PageNode): string[] => {
+        let ids = [node.id];
+        for (const child of node.children) {
+          ids = ids.concat(collectIds(child));
+        }
+        return ids;
+      };
+      const removedIds = collectIds(removedPage);
+      return prev.filter((id) => !removedIds.includes(id));
+    });
+
+    commitWorldsUpdate((prev) =>
       prev.map((world) =>
         world.id === activeWorld.id
           ? {
@@ -1732,6 +1584,10 @@ export default function Home() {
           : world,
       ),
     );
+    queueChanges([
+      { type: 'removePage', worldId: activeWorld.id, pageId },
+      { type: 'appendActivity', worldId: activeWorld.id, entries: [deleteEntry] },
+    ]);
 
     if (selectedPageId === pageId) {
       setSelectedPageId(null);
@@ -1779,7 +1635,7 @@ export default function Home() {
         )
       : null;
 
-    setWorlds((prev) =>
+    commitWorldsUpdate((prev) =>
       prev.map((world) =>
         world.id === activeWorld.id
           ? {
@@ -1790,6 +1646,10 @@ export default function Home() {
           : world,
       ),
     );
+    queueChanges([
+      { type: 'movePage', worldId: activeWorld.id, pageId: draggedPageId, targetId, position: 'before' },
+      ...(moveEntry ? [{ type: 'appendActivity', worldId: activeWorld.id, entries: [moveEntry] }] : []),
+    ]);
 
     setDraggedPageId(null);
   };
@@ -1797,7 +1657,7 @@ export default function Home() {
   const handleUpdatePageTitle = (pageId: string, title: string) => {
     if (!activeWorld) return;
 
-    setWorlds((prev) =>
+    commitWorldsUpdate((prev) =>
       prev.map((world) =>
         world.id === activeWorld.id
           ? {
@@ -1807,12 +1667,13 @@ export default function Home() {
           : world,
       ),
     );
+    queueChanges([buildPageChange(activeWorld.id, pageId, { title })]);
   };
 
   const handleUpdatePageContent = (pageId: string, content: string) => {
     if (!activeWorld) return;
 
-    setWorlds((prev) =>
+    commitWorldsUpdate((prev) =>
       prev.map((world) =>
         world.id === activeWorld.id
           ? {
@@ -1822,6 +1683,7 @@ export default function Home() {
           : world,
       ),
     );
+    queueChanges([buildPageChange(activeWorld.id, pageId, { content })]);
   };
 
   const handleEditorInput = () => {
@@ -1852,21 +1714,12 @@ export default function Home() {
   };
 
   const handleManualSync = async () => {
-    if (saveTimerRef.current) {
-      window.clearTimeout(saveTimerRef.current);
-      saveTimerRef.current = null;
+    if (flushTimerRef.current) {
+      window.clearTimeout(flushTimerRef.current);
+      flushTimerRef.current = null;
     }
 
-    if (!isOnline) {
-      setSaveStatus('offline');
-      pendingSaveRef.current = true;
-      return;
-    }
-
-    setSaveStatus('syncing');
-    await persistWorlds();
-    pendingSaveRef.current = false;
-    setSaveStatus('saved');
+    await flushPendingChanges();
   };
 
   const handleToggleExportPage = (pageId: string) => {
@@ -3235,6 +3088,8 @@ export default function Home() {
                     onDragEnd={handlePageDragEnd}
                     onDrop={handlePageDrop}
                     draggedPageId={draggedPageId}
+                    collapsedIds={collapsedPageIds}
+                    onToggleCollapse={handleToggleCollapse}
                   />
                 ) : (
                   <div className="rounded-xl border border-dashed border-white/10 px-3 py-6 text-center text-sm text-slate-400">
