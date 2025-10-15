@@ -14,8 +14,6 @@ type StoredDocument = MongoDocument & {
   createdAt: Date | string;
   updatedAt: Date | string;
 };
-type NewStoredDocument = Omit<StoredDocument, '_id'>;
-
 function mapDocument(document: StoredDocument): DocumentNode {
   return {
     _id: document._id?.toString(),
@@ -82,12 +80,19 @@ export async function insertDocument(
       throw new Error('Parent document not found.');
     }
 
-    parentPath = [...(parent.path ?? []), parent._id.toString()];
+    const normalizedPath = Array.isArray(parent.path)
+      ? parent.path.map((segment) =>
+          typeof segment === 'string' ? segment : (segment as ObjectId).toString()
+        )
+      : [];
+
+    parentPath = [...normalizedPath, parent._id.toString()];
     isRoot = false;
   }
 
   const now = new Date();
-  const document: NewStoredDocument = {
+  const newDocument: StoredDocument = {
+    _id: new ObjectId(),
     ownerId,
     worldId,
     title: payload.title,
@@ -99,14 +104,10 @@ export async function insertDocument(
     updatedAt: now,
   };
 
-  const result = await db.collection('documents').insertOne(document);
+  const collection = db.collection<StoredDocument>('documents');
+  await collection.insertOne(newDocument);
 
-  const storedDocument: StoredDocument = {
-    ...document,
-    _id: result.insertedId,
-  };
-
-  return mapDocument(storedDocument);
+  return mapDocument(newDocument);
 }
 
 export async function updateDocument(

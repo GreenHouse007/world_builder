@@ -2,6 +2,7 @@
 
 import Image from 'next/image';
 import type { ChangeEvent, DragEvent, FormEvent, KeyboardEvent } from 'react';
+import type { ReactElement } from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { User } from 'firebase/auth';
 
@@ -1005,11 +1006,16 @@ export default function Home() {
   const [shareMenuWorldId, setShareMenuWorldId] = useState<string | null>(null);
   const [textSize, setTextSize] = useState('3');
   const [textColor, setTextColor] = useState('#e2e8f0');
+  const [isLightMode, setIsLightMode] = useState(false);
+  const [isExportMenuOpen, setIsExportMenuOpen] = useState(false);
+  const [selectedExportPageIds, setSelectedExportPageIds] = useState<string[]>([]);
   const [saveStatus, setSaveStatus] = useState<'saved' | 'saving' | 'offline' | 'syncing'>('saved');
   const saveTimerRef = useRef<number | null>(null);
   const pendingSaveRef = useRef(false);
   const [isOnline, setIsOnline] = useState(true);
   const isFirstSaveRef = useRef(true);
+  const exportMenuRef = useRef<HTMLDivElement | null>(null);
+  const previousRootIdsRef = useRef<string[]>([]);
 
   const getCurrentUserCollaborator = useCallback(
     (role: CollaboratorRole = 'Owner'): WorldCollaborator => {
@@ -1173,6 +1179,10 @@ export default function Home() {
   const currentPageId = selectedPage?.id ?? null;
   const currentPageTitle = selectedPage?.title ?? '';
   const currentPageContent = selectedPage?.content ?? '';
+  const rootPageIdSignature = useMemo(
+    () => (activeWorld?.pages ?? []).map((page) => page.id).join('|'),
+    [activeWorld?.pages],
+  );
   const favoritePages = useMemo(
     () => (activeWorld ? flattenPages(activeWorld.pages).filter((page) => page.favorite) : []),
     [activeWorld],
@@ -1316,6 +1326,69 @@ export default function Home() {
       window.removeEventListener('offline', updateStatus);
     };
   }, []);
+
+  useEffect(() => {
+    const rootPages = activeWorld?.pages ?? [];
+    const currentRootIds = rootPages.map((page) => page.id);
+    const previousRootIds = previousRootIdsRef.current;
+    const removedIds = previousRootIds.filter((id) => !currentRootIds.includes(id));
+    const addedIds = currentRootIds.filter((id) => !previousRootIds.includes(id));
+
+    setSelectedExportPageIds((prev) => {
+      let next = prev;
+      let changed = false;
+
+      if (removedIds.length) {
+        next = prev.filter((id) => !removedIds.includes(id));
+        changed = true;
+      }
+
+      if (addedIds.length) {
+        const appended = addedIds.filter((id) => !next.includes(id));
+        if (appended.length) {
+          next = [...next, ...appended];
+          changed = true;
+        }
+      }
+
+      if (!prev.length && currentRootIds.length && !changed) {
+        return currentRootIds;
+      }
+
+      return changed ? next : prev;
+    });
+
+    previousRootIdsRef.current = currentRootIds;
+  }, [activeWorldId, rootPageIdSignature]);
+
+  useEffect(() => {
+    if (!isExportMenuOpen) return;
+
+    const handleClickOutside = (event: MouseEvent) => {
+      if (!exportMenuRef.current) return;
+      if (event.target instanceof Node && !exportMenuRef.current.contains(event.target)) {
+        setIsExportMenuOpen(false);
+      }
+    };
+
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setIsExportMenuOpen(false);
+      }
+    };
+
+    document.addEventListener('mousedown', handleClickOutside);
+    document.addEventListener('keydown', handleKeyDown);
+
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [isExportMenuOpen]);
+
+  useEffect(() => {
+    setTextColor(isLightMode ? '#0f172a' : '#e2e8f0');
+  }, [isLightMode]);
 
   const handleSelectWorld = (worldId: string) => {
     setActiveWorldId(worldId);
@@ -1796,6 +1869,47 @@ export default function Home() {
     setSaveStatus('saved');
   };
 
+  const handleToggleExportPage = (pageId: string) => {
+    setSelectedExportPageIds((prev) =>
+      prev.includes(pageId) ? prev.filter((id) => id !== pageId) : [...prev, pageId],
+    );
+  };
+
+  const handleExportPdf = () => {
+    const rootPages = activeWorld?.pages ?? [];
+    const selectedSet = new Set(selectedExportPageIds);
+    const selectedPages = rootPages.filter((page) => selectedSet.has(page.id));
+
+    if (!selectedPages.length) {
+      if (typeof window !== 'undefined') {
+        window.alert('Select at least one page to export.');
+      }
+      return;
+    }
+
+    setIsExportMenuOpen(false);
+
+    if (typeof window !== 'undefined') {
+      const titles = selectedPages.map((page) => page.title || 'Untitled page').join(', ');
+      window.setTimeout(() => {
+        window.alert(`Preparing a PDF with: ${titles}. It will download shortly.`);
+      }, 150);
+    }
+  };
+
+  const handleToggleLightMode = () => {
+    setIsLightMode((prev) => !prev);
+  };
+
+  const handleSelectAllExportPages = () => {
+    const rootPages = activeWorld?.pages ?? [];
+    setSelectedExportPageIds(rootPages.map((page) => page.id));
+  };
+
+  const handleClearExportPages = () => {
+    setSelectedExportPageIds([]);
+  };
+
   const handleWorldNameInput = (event: ChangeEvent<HTMLInputElement>) => {
     setWorldNameDraft(event.target.value);
   };
@@ -2152,7 +2266,7 @@ export default function Home() {
       );
     }
 
-    const toolbarButtons: { label: string; command: string; value?: string; icon: JSX.Element }[] = [
+    const toolbarButtons: { label: string; command: string; value?: string; icon: ReactElement }[] = [
       {
         label: 'Bold',
         command: 'bold',
@@ -2234,14 +2348,115 @@ export default function Home() {
       { label: 'Huge', value: '5' },
     ];
 
-    const colorOptions = [
-      { label: 'Snow', value: '#e2e8f0' },
-      { label: 'Celestial', value: '#38bdf8' },
-      { label: 'Petal', value: '#f472b6' },
-      { label: 'Aurora', value: '#a855f7' },
-      { label: 'Ember', value: '#f97316' },
-      { label: 'Verdant', value: '#34d399' },
-    ];
+    const colorOptions = isLightMode
+      ? [
+          { label: 'Ink', value: '#0f172a' },
+          { label: 'Amber', value: '#b45309' },
+          { label: 'Rosewood', value: '#be123c' },
+          { label: 'Ocean', value: '#0ea5e9' },
+          { label: 'Moss', value: '#047857' },
+          { label: 'Orchid', value: '#6d28d9' },
+        ]
+      : [
+          { label: 'Snow', value: '#e2e8f0' },
+          { label: 'Celestial', value: '#38bdf8' },
+          { label: 'Petal', value: '#f472b6' },
+          { label: 'Aurora', value: '#a855f7' },
+          { label: 'Ember', value: '#f97316' },
+          { label: 'Verdant', value: '#34d399' },
+        ];
+
+    const panelClasses = isLightMode
+      ? 'overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-xl'
+      : 'overflow-hidden rounded-3xl border border-white/10 bg-slate-950/70 shadow-inner';
+
+    const toolbarSectionClasses = isLightMode
+      ? 'border-b border-slate-200 bg-slate-50 px-3 py-3'
+      : 'border-b border-white/10 bg-slate-950/85 px-3 py-3';
+
+    const titleSectionClasses = isLightMode
+      ? 'border-b border-slate-200 bg-white px-3 py-3'
+      : 'border-b border-white/10 bg-gradient-to-br from-white/10 via-white/5 to-transparent px-3 py-3';
+
+    const bodySectionClasses = isLightMode ? 'bg-white px-3 py-3' : 'bg-slate-950/85 px-3 py-3';
+
+    const toolbarButtonClass = isLightMode
+      ? 'inline-flex h-9 items-center justify-center gap-2 rounded-xl border border-slate-200 bg-slate-100 px-3 text-xs font-semibold uppercase tracking-[0.28em] text-slate-700 transition hover:-translate-y-0.5 hover:border-indigo-300/70 hover:bg-slate-200/70 hover:text-indigo-600'
+      : 'inline-flex h-9 items-center justify-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 text-xs font-semibold uppercase tracking-[0.28em] text-slate-200 transition hover:-translate-y-0.5 hover:border-indigo-300/60 hover:text-indigo-100';
+
+    const sizeControlClass = isLightMode
+      ? 'inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-slate-100 px-3 py-1.5 text-[11px] uppercase tracking-[0.3em] text-slate-600'
+      : 'inline-flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-1.5 text-[11px] uppercase tracking-[0.3em] text-slate-300';
+
+    const selectClass = isLightMode
+      ? 'rounded-lg border border-slate-300 bg-white px-2 py-1 text-xs font-semibold uppercase tracking-[0.28em] text-slate-700 outline-none focus:border-indigo-300/80'
+      : 'rounded-lg border border-white/10 bg-slate-900/70 px-2 py-1 text-xs font-semibold uppercase tracking-[0.28em] text-slate-100 outline-none focus:border-indigo-300/60';
+
+    const colorGroupClass = isLightMode
+      ? 'flex items-center gap-1 rounded-xl border border-slate-200 bg-slate-100 px-3 py-1.5'
+      : 'flex items-center gap-1 rounded-xl border border-white/10 bg-white/5 px-3 py-1.5';
+
+    const colorLabelClass = isLightMode
+      ? 'text-[11px] uppercase tracking-[0.3em] text-slate-600'
+      : 'text-[11px] uppercase tracking-[0.3em] text-slate-300';
+
+    const editorSurfaceClass = `mt-3 min-h-[420px] rounded-2xl border px-3 py-2 text-base leading-relaxed outline-none transition focus-within:ring-2 ${
+      isLightMode
+        ? 'border-slate-200 bg-white text-slate-800 focus-within:border-indigo-300 focus-within:ring-indigo-200/70'
+        : 'border-white/10 bg-slate-950/80 text-slate-200 focus-within:border-indigo-400/50 focus-within:ring-indigo-400/30'
+    }`;
+
+    const infoRowClass = `mt-3 flex flex-wrap items-center justify-between gap-3 text-xs uppercase tracking-[0.28em] ${
+      isLightMode ? 'text-slate-500' : 'text-slate-400'
+    }`;
+
+    const exportButtonClass = isLightMode
+      ? 'inline-flex items-center gap-2 rounded-full border border-slate-300 bg-white px-3 py-1 text-[11px] font-semibold text-slate-700 transition hover:-translate-y-0.5 hover:border-indigo-300/70 hover:text-indigo-600'
+      : 'inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] font-semibold text-indigo-100 transition hover:-translate-y-0.5 hover:border-indigo-300/60 hover:text-indigo-50';
+
+    const exportMenuClasses = isLightMode
+      ? 'absolute right-0 top-11 z-30 w-64 rounded-2xl border border-slate-200 bg-white p-4 shadow-xl'
+      : 'absolute right-0 top-11 z-30 w-64 rounded-2xl border border-white/10 bg-slate-950/95 p-4 shadow-2xl';
+
+    const exportMenuHeadingClass = isLightMode
+      ? 'text-[11px] uppercase tracking-[0.28em] text-slate-500'
+      : 'text-[11px] uppercase tracking-[0.28em] text-slate-400';
+
+    const exportMenuDescriptionClass = isLightMode ? 'mt-1 text-xs text-slate-500' : 'mt-1 text-xs text-slate-400';
+
+    const exportMenuListClass = isLightMode
+      ? 'mt-3 space-y-2 text-sm text-slate-700'
+      : 'mt-3 space-y-2 text-sm text-slate-200';
+
+    const exportMenuItemClass = isLightMode
+      ? 'flex items-center justify-between gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2'
+      : 'flex items-center justify-between gap-2 rounded-xl border border-white/10 bg-slate-900/70 px-3 py-2';
+
+    const exportMenuActionClass = `${
+      isLightMode
+        ? 'rounded-lg border border-slate-200 bg-white text-slate-700 hover:border-indigo-300/70 hover:text-indigo-600'
+        : 'rounded-lg border border-white/10 bg-slate-900/70 text-slate-200 hover:border-indigo-300/60 hover:text-indigo-100'
+    } px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.28em] transition disabled:cursor-not-allowed disabled:opacity-60`;
+
+    const exportDownloadClass = `${
+      isLightMode
+        ? 'rounded-lg border border-indigo-200 bg-indigo-500/10 text-indigo-600 hover:bg-indigo-500/20'
+        : 'rounded-lg border border-indigo-300/60 bg-indigo-500/20 text-indigo-100 hover:bg-indigo-500/30'
+    } px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.28em] transition disabled:cursor-not-allowed disabled:opacity-60`;
+
+    const toggleButtonClass = isLightMode
+      ? 'ml-auto inline-flex h-9 items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 text-[11px] font-semibold uppercase tracking-[0.3em] text-slate-700 transition hover:-translate-y-0.5 hover:border-indigo-300/70 hover:text-indigo-600'
+      : 'ml-auto inline-flex h-9 items-center gap-2 rounded-xl border border-white/10 bg-slate-900/70 px-3 text-[11px] font-semibold uppercase tracking-[0.3em] text-slate-200 transition hover:-translate-y-0.5 hover:border-indigo-300/60 hover:text-indigo-100';
+
+    const toggleIconClass = isLightMode ? 'h-4 w-4 text-amber-500' : 'h-4 w-4 text-indigo-200';
+
+    const titleInputClasses = isLightMode
+      ? 'w-full bg-transparent text-3xl font-semibold text-slate-800 outline-none placeholder:text-slate-400'
+      : 'w-full bg-transparent text-3xl font-semibold text-slate-50 outline-none placeholder:text-slate-500';
+
+    const rootPages = activeWorld?.pages ?? [];
+    const selectedExportCount = selectedExportPageIds.length;
+    const totalExportable = rootPages.length;
 
     const handleTextSizeSelect = (value: string) => {
       setTextSize(value);
@@ -2255,10 +2470,86 @@ export default function Home() {
 
     return (
       <div className="flex flex-col gap-6">
-        <div className="overflow-hidden rounded-3xl border border-white/10 bg-slate-950/70 shadow-inner">
-          <div className="bg-gradient-to-br from-white/10 via-white/5 to-transparent px-6 py-6">
+        <div className={panelClasses}>
+          <div className={toolbarSectionClasses}>
+            <div className="flex w-full flex-wrap items-center gap-2 sm:gap-3">
+              <div className="flex flex-1 flex-wrap items-center gap-2 sm:gap-3">
+                {toolbarButtons.map((button) => (
+                  <button
+                    key={button.label}
+                    type="button"
+                    onClick={() => handleToolbarAction(button.command, button.value)}
+                    className={toolbarButtonClass}
+                    aria-label={button.label}
+                  >
+                    {button.icon}
+                  </button>
+                ))}
+
+                <label className={sizeControlClass}>
+                  Size
+                  <select
+                    value={textSize}
+                    onChange={(event) => handleTextSizeSelect(event.target.value)}
+                    className={selectClass}
+                  >
+                    {sizeOptions.map((option) => (
+                      <option key={option.value} value={option.value} className="text-slate-900">
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <div className={colorGroupClass}>
+                  <span className={colorLabelClass}>Color</span>
+                  <div className="flex items-center gap-1.5">
+                    {colorOptions.map((option) => (
+                      <button
+                        key={option.value}
+                        type="button"
+                        onClick={() => handleTextColorSelect(option.value)}
+                        className={`h-6 w-6 rounded-full border-2 transition ${
+                          textColor === option.value
+                            ? isLightMode
+                              ? 'border-indigo-300 ring-2 ring-indigo-200/70'
+                              : 'border-white ring-2 ring-indigo-300/60'
+                            : isLightMode
+                              ? 'border-slate-300 hover:border-slate-400'
+                              : 'border-white/20 hover:border-white/60'
+                        }`}
+                        style={{ backgroundColor: option.value }}
+                        aria-label={`Set text color to ${option.label}`}
+                      />
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={handleToggleLightMode}
+                className={toggleButtonClass}
+                aria-pressed={isLightMode}
+                title={isLightMode ? 'Switch to dark mode' : 'Switch to light mode'}
+              >
+                {isLightMode ? (
+                  <svg aria-hidden="true" viewBox="0 0 20 20" className={toggleIconClass} fill="currentColor">
+                    <path d="M11.08 2.25a.75.75 0 0 1 .9.9 6.5 6.5 0 0 0 7.17 7.92.75.75 0 0 1 .57 1.35 8 8 0 1 1-8.64-10.17Z" />
+                  </svg>
+                ) : (
+                  <svg aria-hidden="true" viewBox="0 0 20 20" className={toggleIconClass} fill="currentColor">
+                    <path d="M10 3a1 1 0 0 1 1 1v1.25a1 1 0 0 1-2 0V4a1 1 0 0 1 1-1Zm5.657 1.343a1 1 0 0 1 0 1.414l-.884.884a1 1 0 1 1-1.414-1.414l.884-.884a1 1 0 0 1 1.414 0ZM17 9a1 1 0 1 1 0 2h-1.25a1 1 0 0 1 0-2H17ZM5.64 5.64a1 1 0 0 1-1.414 0l-.884-.884a1 1 0 1 1 1.414-1.414l.884.884a1 1 0 0 1 0 1.414ZM10 6.5a3.5 3.5 0 1 1 0 7 3.5 3.5 0 0 1 0-7ZM4 10a1 1 0 0 1-1 1H1.75a1 1 0 0 1 0-2H3a1 1 0 0 1 1 1Zm10.017 4.358a1 1 0 0 1 1.415 1.414l-.885.884a1 1 0 0 1-1.414-1.414l.884-.884ZM11 16a1 1 0 1 1-2 0v-1.25a1 1 0 0 1 2 0V16Zm-6.071-1.358.884.884a1 1 0 0 1-1.414 1.414l-.884-.884a1 1 0 0 1 1.414-1.414Z" />
+                  </svg>
+                )}
+                <span>{isLightMode ? 'Dark' : 'Light'}</span>
+              </button>
+            </div>
+          </div>
+
+          <div className={titleSectionClasses}>
             <input
-              className="w-full bg-transparent text-3xl font-semibold text-slate-50 outline-none placeholder:text-slate-500"
+              className={titleInputClasses}
               value={editorTitle}
               onChange={(event) => {
                 setEditorTitle(event.target.value);
@@ -2268,59 +2559,10 @@ export default function Home() {
             />
           </div>
 
-          <div className="border-t border-white/10 bg-slate-950/85 px-6 py-5">
-            <div className="flex flex-wrap items-center gap-2 sm:gap-3">
-              {toolbarButtons.map((button) => (
-                <button
-                  key={button.label}
-                  type="button"
-                  onClick={() => handleToolbarAction(button.command, button.value)}
-                  className="inline-flex h-9 items-center justify-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 text-xs font-semibold uppercase tracking-[0.28em] text-slate-200 transition hover:-translate-y-0.5 hover:border-indigo-300/60 hover:text-indigo-100"
-                  aria-label={button.label}
-                >
-                  {button.icon}
-                </button>
-              ))}
-
-              <label className="inline-flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-1.5 text-[11px] uppercase tracking-[0.3em] text-slate-300">
-                Size
-                <select
-                  value={textSize}
-                  onChange={(event) => handleTextSizeSelect(event.target.value)}
-                  className="rounded-lg border border-white/10 bg-slate-900/70 px-2 py-1 text-xs font-semibold uppercase tracking-[0.28em] text-slate-100 outline-none focus:border-indigo-300/60"
-                >
-                  {sizeOptions.map((option) => (
-                    <option key={option.value} value={option.value} className="text-slate-900">
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <div className="flex items-center gap-1 rounded-xl border border-white/10 bg-white/5 px-3 py-1.5">
-                <span className="text-[11px] uppercase tracking-[0.3em] text-slate-300">Color</span>
-                <div className="flex items-center gap-1.5">
-                  {colorOptions.map((option) => (
-                    <button
-                      key={option.value}
-                      type="button"
-                      onClick={() => handleTextColorSelect(option.value)}
-                      className={`h-6 w-6 rounded-full border-2 transition ${
-                        textColor === option.value
-                          ? 'border-white ring-2 ring-indigo-300/60'
-                          : 'border-white/20 hover:border-white/60'
-                      }`}
-                      style={{ backgroundColor: option.value }}
-                      aria-label={`Set text color to ${option.label}`}
-                    />
-                  ))}
-                </div>
-              </div>
-            </div>
-
+          <div className={bodySectionClasses}>
             <div
               ref={editorRef}
-              className="mt-5 min-h-[420px] rounded-2xl border border-white/10 bg-slate-950/80 px-5 py-4 text-base leading-relaxed text-slate-200 outline-none transition focus-within:border-indigo-400/50 focus-within:ring-2 focus-within:ring-indigo-400/30"
+              className={editorSurfaceClass}
               contentEditable
               suppressContentEditableWarning
               onInput={handleEditorInput}
@@ -2330,11 +2572,91 @@ export default function Home() {
               aria-multiline="true"
             />
 
-            <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-xs uppercase tracking-[0.28em] text-slate-400">
+            <div className={infoRowClass}>
               <span>Rich text · Live autosave</span>
-              <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] font-semibold text-indigo-100">
-                {syncStatusLabel}
-              </span>
+              <div className="relative" ref={exportMenuRef}>
+                <button
+                  type="button"
+                  onClick={() => setIsExportMenuOpen((prev) => !prev)}
+                  className={exportButtonClass}
+                  aria-expanded={isExportMenuOpen}
+                  aria-haspopup="menu"
+                >
+                  <svg aria-hidden="true" viewBox="0 0 20 20" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.5">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M6 4h8m-7 4h6m-7 4h6m-8 4h10a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2Z" />
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M7 14h6l-3 4-3-4Z" />
+                  </svg>
+                  <span>Export PDF</span>
+                </button>
+
+                {isExportMenuOpen ? (
+                  <div className={exportMenuClasses} role="menu">
+                    <p className={exportMenuHeadingClass}>Export PDF</p>
+                    <p className={exportMenuDescriptionClass}>Choose pages from your inbox to include in the download.</p>
+                    {rootPages.length ? (
+                      <>
+                        <ul className={exportMenuListClass}>
+                          {rootPages.map((page) => {
+                            const isChecked = selectedExportPageIds.includes(page.id);
+                            return (
+                              <li key={page.id} className={exportMenuItemClass}>
+                                <label className="flex flex-1 items-center gap-2">
+                                  <input
+                                    type="checkbox"
+                                    checked={isChecked}
+                                    onChange={() => handleToggleExportPage(page.id)}
+                                    className={`h-4 w-4 rounded border focus:ring-2 ${
+                                      isLightMode
+                                        ? 'border-slate-300 text-indigo-500 focus:ring-indigo-300/70'
+                                        : 'border-slate-600 bg-slate-900 text-indigo-300 focus:ring-indigo-400/60'
+                                    }`}
+                                  />
+                                  <span className="truncate">{page.title || 'Untitled page'}</span>
+                                </label>
+                              </li>
+                            );
+                          })}
+                        </ul>
+
+                        <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+                          <div
+                            className={`text-[11px] uppercase tracking-[0.28em] ${
+                              isLightMode ? 'text-slate-500' : 'text-slate-400'
+                            }`}
+                          >
+                            {totalExportable ? `${selectedExportCount}/${totalExportable} selected` : 'No pages'}
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <button type="button" onClick={handleSelectAllExportPages} className={exportMenuActionClass}>
+                              Select all
+                            </button>
+                            <button
+                              type="button"
+                              onClick={handleClearExportPages}
+                              className={exportMenuActionClass}
+                              disabled={!selectedExportCount}
+                            >
+                              Clear
+                            </button>
+                            <button
+                              type="button"
+                              onClick={handleExportPdf}
+                              className={exportDownloadClass}
+                              disabled={!selectedExportCount}
+                            >
+                              Download
+                            </button>
+                          </div>
+                        </div>
+                      </>
+                    ) : (
+                      <p className={`mt-3 text-sm ${isLightMode ? 'text-slate-500' : 'text-slate-400'}`}>
+                        Add pages to this world to build your PDF.
+                      </p>
+                    )}
+                  </div>
+                ) : null}
+              </div>
             </div>
           </div>
         </div>
@@ -2612,9 +2934,6 @@ export default function Home() {
 
             <div className="flex items-center gap-3">
               <div className="flex min-w-0 items-center gap-3">
-                <span className="hidden pr-4 text-xs uppercase tracking-[0.32em] text-slate-400 sm:block">
-                  Current world
-                </span>
                 {editingWorldId === activeWorld?.id ? (
                   <input
                     ref={editingWorldId === activeWorld?.id ? worldNameInputRef : null}
