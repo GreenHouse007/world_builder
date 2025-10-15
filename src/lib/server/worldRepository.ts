@@ -10,8 +10,6 @@ type StoredWorld = MongoDocument & {
   createdAt: Date | string;
   updatedAt: Date | string;
 };
-type NewStoredWorld = Omit<StoredWorld, '_id'>;
-
 function mapWorld(document: StoredWorld): World {
   return {
     _id: document._id?.toString(),
@@ -48,9 +46,11 @@ export async function findWorldById(worldId: string, ownerId: string): Promise<W
 
 export async function insertWorld(ownerId: string, name: string, description?: string): Promise<World> {
   const db = await getDatabase();
+  const { ObjectId } = await import('mongodb');
   const now = new Date();
 
-  const payload: NewStoredWorld = {
+  const newWorld: StoredWorld = {
+    _id: new ObjectId(),
     ownerId,
     name,
     description,
@@ -58,14 +58,10 @@ export async function insertWorld(ownerId: string, name: string, description?: s
     updatedAt: now,
   };
 
-  const result = await db.collection('worlds').insertOne(payload);
+  const collection = db.collection<StoredWorld>('worlds');
+  await collection.insertOne(newWorld);
 
-  const storedWorld: StoredWorld = {
-    ...payload,
-    _id: result.insertedId,
-  };
-
-  return mapWorld(storedWorld);
+  return mapWorld(newWorld);
 }
 
 export async function touchWorld(worldId: string) {
