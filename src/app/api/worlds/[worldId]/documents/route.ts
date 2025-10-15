@@ -39,10 +39,11 @@ function handleError(error: unknown, fallbackStatus = 500) {
 
 export async function GET(
   request: NextRequest,
-  { params }: { params: { worldId: string } }
+  context: { params: Promise<{ worldId: string }> }
 ) {
   try {
     const ownerId = getUserIdFromRequest(request);
+    const params = await context.params;
     const worldId = params.worldId;
 
     await ensureWorldAccess(worldId, ownerId);
@@ -55,10 +56,11 @@ export async function GET(
 
 export async function POST(
   request: NextRequest,
-  { params }: { params: { worldId: string } }
+  context: { params: Promise<{ worldId: string }> }
 ) {
   try {
     const ownerId = getUserIdFromRequest(request);
+    const params = await context.params;
     const worldId = params.worldId;
     const body = await request.json();
 

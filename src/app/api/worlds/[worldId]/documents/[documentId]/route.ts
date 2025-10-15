@@ -31,10 +31,11 @@ function handleError(error: unknown, fallbackStatus = 500) {
 
 export async function GET(
   request: NextRequest,
-  { params }: { params: { worldId: string; documentId: string } }
+  context: { params: Promise<{ worldId: string; documentId: string }> }
 ) {
   try {
     const ownerId = getUserIdFromRequest(request);
+    const params = await context.params;
     const { worldId, documentId } = params;
 
     await ensureWorldAccess(worldId, ownerId);
@@ -52,10 +53,11 @@ export async function GET(
 
 export async function PATCH(
   request: NextRequest,
-  { params }: { params: { worldId: string; documentId: string } }
+  context: { params: Promise<{ worldId: string; documentId: string }> }
 ) {
   try {
     const ownerId = getUserIdFromRequest(request);
+    const params = await context.params;
     const { worldId, documentId } = params;
     const body = await request.json();
 
@@ -78,10 +80,11 @@ export async function PATCH(
 
 export async function DELETE(
   request: NextRequest,
-  { params }: { params: { worldId: string; documentId: string } }
+  context: { params: Promise<{ worldId: string; documentId: string }> }
 ) {
   try {
     const ownerId = getUserIdFromRequest(request);
+    const params = await context.params;
     const { worldId, documentId } = params;
 
     await ensureWorldAccess(worldId, ownerId);
