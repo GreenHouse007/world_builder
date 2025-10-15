@@ -1,8 +1,8 @@
 'use client';
 
 import Image from 'next/image';
-import type { FormEvent } from 'react';
-import { useEffect, useMemo, useState } from 'react';
+import type { ChangeEvent, FormEvent, KeyboardEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { User } from 'firebase/auth';
 
 import { loadFirebase } from '@/lib/firebase/client';
@@ -82,6 +82,56 @@ const templates = [
   },
 ];
 
+const STORAGE_KEY = 'enfield-worlds';
+
+const generateId = (prefix: string) => {
+  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
+    return `${prefix}-${crypto.randomUUID()}`;
+  }
+
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+};
+
+const ensureHtmlContent = (content: string) => {
+  if (!content || !content.trim()) {
+    return '';
+  }
+
+  const trimmed = content.trim();
+  if (/<[a-z][\s\S]*>/i.test(trimmed)) {
+    return content;
+  }
+
+  const escaped = content
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+
+  return `<p>${escaped.replace(/\n{2,}/g, '</p><p>').replace(/\n/g, '<br />')}</p>`;
+};
+
+const sanitizeEditorHtml = (html: string) => html.replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, '');
+
+const loadWorldsFromStorage = (): World[] => {
+  if (typeof window !== 'undefined') {
+    const stored = window.localStorage.getItem(STORAGE_KEY);
+    if (stored) {
+      try {
+        const parsed = JSON.parse(stored) as World[];
+        if (Array.isArray(parsed)) {
+          return parsed;
+        }
+      } catch (error) {
+        console.warn('Unable to parse stored worlds, falling back to defaults.', error);
+      }
+    }
+  }
+
+  return initialWorlds;
+};
+
 const initialWorlds: World[] = [
   {
     id: 'world-aerie',
@@ -158,26 +208,11 @@ const initialWorlds: World[] = [
 ];
 
 const createPage = (title = 'Untitled page'): PageNode => ({
-  id: `page-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+  id: generateId('page'),
   title,
   content: '',
   children: [],
 });
-
-const markExpanded = (nodes: PageNode[], expanded: Record<string, boolean>) => {
-  nodes.forEach((node) => {
-    expanded[node.id] = true;
-    if (node.children.length) {
-      markExpanded(node.children, expanded);
-    }
-  });
-};
-
-const getInitialExpanded = (worlds: World[]) => {
-  const expanded: Record<string, boolean> = {};
-  worlds.forEach((world) => markExpanded(world.pages, expanded));
-  return expanded;
-};
 
 const addPageToTree = (nodes: PageNode[], parentId: string | null, newPage: PageNode): PageNode[] => {
   if (!parentId) {
@@ -244,58 +279,45 @@ const findPageInTree = (nodes: PageNode[], pageId: string | null): PageNode | nu
   return null;
 };
 
+const clonePageTree = (nodes: PageNode[]): PageNode[] =>
+  nodes.map((node) => ({
+    id: generateId('page'),
+    title: node.title,
+    content: node.content,
+    children: clonePageTree(node.children),
+  }));
+
 type PageTreeProps = {
   nodes: PageNode[];
-  expanded: Record<string, boolean>;
   selectedId: string | null;
   onSelect: (id: string) => void;
-  onToggle: (id: string) => void;
   onAddChild: (id: string) => void;
   depth?: number;
 };
-
-function PageTree({ nodes, expanded, selectedId, onSelect, onToggle, onAddChild, depth = 0 }: PageTreeProps) {
+function PageTree({ nodes, selectedId, onSelect, onAddChild, depth = 0 }: PageTreeProps) {
   return (
-    <ul className={depth === 0 ? 'space-y-1.5' : 'space-y-1.5 border-l border-white/5 pl-3'}>
+    <ul className={depth === 0 ? 'space-y-1.5' : 'space-y-1.5 border-l border-white/5 pl-4'}>
       {nodes.map((node) => {
-        const isExpanded = expanded[node.id] ?? false;
         const hasChildren = node.children.length > 0;
         const isSelected = node.id === selectedId;
 
         return (
-          <li key={node.id}>
+          <li key={node.id} className="space-y-1">
             <div
-              className={`group flex items-center gap-1 rounded-xl border border-transparent px-2 py-1.5 text-sm transition ${
+              className={`group flex items-center gap-2 rounded-xl border border-transparent px-2 py-1.5 text-sm transition ${
                 isSelected
                   ? 'border-indigo-400/60 bg-indigo-500/20 text-indigo-100 shadow-[0_0_0_1px_rgba(129,140,248,0.25)]'
                   : 'text-slate-300 hover:border-white/10 hover:bg-white/5 hover:text-slate-100'
               }`}
             >
-              <button
-                type="button"
-                onClick={() => (hasChildren ? onToggle(node.id) : onSelect(node.id))}
-                className={`flex h-6 w-6 items-center justify-center rounded-lg border border-transparent transition ${
-                  hasChildren
-                    ? 'text-slate-400 hover:text-slate-100'
-                    : 'text-slate-500 hover:text-slate-200'
+              <span
+                className={`flex h-6 w-6 items-center justify-center rounded-lg border border-transparent text-xs ${
+                  hasChildren ? 'text-indigo-200/80' : 'text-slate-400'
                 }`}
-                aria-label={hasChildren ? (isExpanded ? 'Collapse page' : 'Expand page') : 'Open page'}
+                aria-hidden="true"
               >
-                {hasChildren ? (
-                  <svg
-                    aria-hidden="true"
-                    viewBox="0 0 16 16"
-                    className={`h-3.5 w-3.5 transition ${isExpanded ? 'rotate-90 text-indigo-200' : 'text-slate-400'}`}
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="1.5"
-                  >
-                    <path d="M5 3.5 11 8 5 12.5" strokeLinecap="round" strokeLinejoin="round" />
-                  </svg>
-                ) : (
-                  <span className="h-1 w-1 rounded-full bg-current" />
-                )}
-              </button>
+                {hasChildren ? '◈' : '•'}
+              </span>
 
               <button
                 type="button"
@@ -317,14 +339,12 @@ function PageTree({ nodes, expanded, selectedId, onSelect, onToggle, onAddChild,
               </button>
             </div>
 
-            {hasChildren && isExpanded ? (
+            {hasChildren ? (
               <div className="pt-1">
                 <PageTree
                   nodes={node.children}
-                  expanded={expanded}
                   selectedId={selectedId}
                   onSelect={onSelect}
-                  onToggle={onToggle}
                   onAddChild={onAddChild}
                   depth={depth + 1}
                 />
@@ -348,13 +368,24 @@ export default function Home() {
   const [authName, setAuthName] = useState('');
   const [authError, setAuthError] = useState<string | null>(null);
   const [authSubmitting, setAuthSubmitting] = useState(false);
-  const [worlds, setWorlds] = useState<World[]>(initialWorlds);
-  const [activeWorldId, setActiveWorldId] = useState<string>(initialWorlds[0]?.id ?? '');
+  const initialWorldsRef = useRef<World[]>(loadWorldsFromStorage());
+  const [worlds, setWorlds] = useState<World[]>(initialWorldsRef.current);
+  const [activeWorldId, setActiveWorldId] = useState<string>(initialWorldsRef.current[0]?.id ?? '');
   const [selectedPageId, setSelectedPageId] = useState<string | null>(null);
   const [view, setView] = useState<'dashboard' | 'page'>('dashboard');
-  const [expandedNodes, setExpandedNodes] = useState<Record<string, boolean>>(() => getInitialExpanded(initialWorlds));
-  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [isWorldMenuOpen, setIsWorldMenuOpen] = useState(false);
+  const [worldActionMenuId, setWorldActionMenuId] = useState<string | null>(null);
+  const [editingWorldId, setEditingWorldId] = useState<string | null>(null);
+  const [worldNameDraft, setWorldNameDraft] = useState('');
+  const worldNameInputRef = useRef<HTMLInputElement | null>(null);
+  const editorRef = useRef<HTMLDivElement | null>(null);
+  const isLocalEditRef = useRef(false);
+  const [editorTitle, setEditorTitle] = useState('');
+  const [saveStatus, setSaveStatus] = useState<'saved' | 'saving' | 'offline' | 'syncing'>('saved');
+  const saveTimerRef = useRef<number | null>(null);
+  const pendingSaveRef = useRef(false);
+  const [isOnline, setIsOnline] = useState(true);
+  const isFirstSaveRef = useRef(true);
 
   useEffect(() => {
     let isMounted = true;
@@ -461,22 +492,158 @@ export default function Home() {
     () => (activeWorld ? findPageInTree(activeWorld.pages, selectedPageId) : null),
     [activeWorld, selectedPageId],
   );
+  const currentPageId = selectedPage?.id ?? null;
+  const currentPageTitle = selectedPage?.title ?? '';
+  const currentPageContent = selectedPage?.content ?? '';
+
+  const persistWorlds = useCallback(async () => {
+    if (typeof window === 'undefined') return;
+
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(worlds));
+  }, [worlds]);
+
+  const syncStatusLabel = useMemo(() => {
+    switch (saveStatus) {
+      case 'saving':
+        return 'Saving…';
+      case 'offline':
+        return 'Offline — changes queued';
+      case 'syncing':
+        return 'Syncing…';
+      default:
+        return 'All changes saved';
+    }
+  }, [saveStatus]);
+
+  const syncButtonClasses = useMemo(() => {
+    if (saveStatus === 'offline') {
+      return 'border-amber-300/40 bg-amber-500/10 text-amber-200 hover:bg-amber-500/20';
+    }
+
+    if (saveStatus === 'saved') {
+      return 'border-emerald-300/40 bg-emerald-500/10 text-emerald-100 hover:bg-emerald-500/20';
+    }
+
+    return 'border-indigo-300/40 bg-indigo-500/20 text-indigo-100 hover:bg-indigo-500/30';
+  }, [saveStatus]);
 
   const userDisplayName = authUser?.displayName?.trim() || authUser?.email?.split('@')[0] || 'Writer';
   const userInitial = userDisplayName.charAt(0).toUpperCase();
   const userEmail = authUser?.email ?? '—';
+
+  useEffect(() => {
+    if (!editingWorldId) return;
+
+    const timer = window.setTimeout(() => {
+      worldNameInputRef.current?.focus();
+      worldNameInputRef.current?.select();
+    }, 0);
+
+    return () => window.clearTimeout(timer);
+  }, [editingWorldId]);
+
+  useEffect(() => {
+    if (currentPageId) {
+      setEditorTitle(currentPageTitle);
+    } else {
+      setEditorTitle('');
+    }
+  }, [currentPageId, currentPageTitle]);
+
+  useEffect(() => {
+    if (!editorRef.current) return;
+
+    if (!currentPageId) {
+      editorRef.current.innerHTML = '';
+      return;
+    }
+
+    if (isLocalEditRef.current) {
+      isLocalEditRef.current = false;
+      return;
+    }
+
+    const html = ensureHtmlContent(currentPageContent);
+    if (editorRef.current.innerHTML !== html) {
+      editorRef.current.innerHTML = html;
+    }
+  }, [currentPageId, currentPageContent]);
+
+  useEffect(() => {
+    if (isFirstSaveRef.current) {
+      isFirstSaveRef.current = false;
+      return;
+    }
+
+    if (!isOnline) {
+      setSaveStatus('offline');
+      pendingSaveRef.current = true;
+      return;
+    }
+
+    setSaveStatus('saving');
+
+    if (saveTimerRef.current) {
+      window.clearTimeout(saveTimerRef.current);
+    }
+
+    saveTimerRef.current = window.setTimeout(async () => {
+      await persistWorlds();
+      setSaveStatus('saved');
+      pendingSaveRef.current = false;
+      saveTimerRef.current = null;
+    }, 1200);
+
+    return () => {
+      if (saveTimerRef.current) {
+        window.clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = null;
+      }
+    };
+  }, [worlds, isOnline, persistWorlds]);
+
+  useEffect(() => {
+    if (isOnline && pendingSaveRef.current) {
+      setSaveStatus('syncing');
+      persistWorlds().then(() => {
+        pendingSaveRef.current = false;
+        setSaveStatus('saved');
+      });
+    }
+  }, [isOnline, persistWorlds]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const updateStatus = () => {
+      setIsOnline(navigator.onLine ?? true);
+    };
+
+    updateStatus();
+
+    window.addEventListener('online', updateStatus);
+    window.addEventListener('offline', updateStatus);
+
+    return () => {
+      window.removeEventListener('online', updateStatus);
+      window.removeEventListener('offline', updateStatus);
+    };
+  }, []);
 
   const handleSelectWorld = (worldId: string) => {
     setActiveWorldId(worldId);
     setSelectedPageId(null);
     setView('dashboard');
     setIsWorldMenuOpen(false);
+    setWorldActionMenuId(null);
+    setEditingWorldId(null);
+    setWorldNameDraft('');
   };
 
   const handleCreateWorld = () => {
     const count = worlds.length + 1;
     const newWorld: World = {
-      id: `world-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      id: generateId('world'),
       name: `New World ${count}`,
       pages: [],
     };
@@ -486,6 +653,9 @@ export default function Home() {
     setSelectedPageId(null);
     setView('dashboard');
     setIsWorldMenuOpen(false);
+    setWorldActionMenuId(null);
+    setEditingWorldId(newWorld.id);
+    setWorldNameDraft(newWorld.name);
   };
 
   const handleAddPage = (parentId?: string) => {
@@ -500,14 +670,89 @@ export default function Home() {
       ),
     );
 
-    setExpandedNodes((prev) => ({
-      ...prev,
-      ...(parentId ? { [parentId]: true } : {}),
-      [newPage.id]: true,
-    }));
-
     setSelectedPageId(newPage.id);
     setView('page');
+  };
+
+  const startWorldRename = (world: World) => {
+    setEditingWorldId(world.id);
+    setWorldNameDraft(world.name);
+  };
+
+  const commitWorldRename = () => {
+    if (!editingWorldId) return;
+
+    const nextName = worldNameDraft.trim() || 'Untitled world';
+    setWorlds((prev) =>
+      prev.map((world) => (world.id === editingWorldId ? { ...world, name: nextName } : world)),
+    );
+    setEditingWorldId(null);
+    setWorldNameDraft('');
+  };
+
+  const cancelWorldRename = () => {
+    setEditingWorldId(null);
+    setWorldNameDraft('');
+  };
+
+  const handleDuplicateWorld = (worldId: string) => {
+    const source = worlds.find((world) => world.id === worldId);
+    if (!source) return;
+
+    const copyName = `${source.name} copy`;
+    const duplicate: World = {
+      id: generateId('world'),
+      name: copyName,
+      pages: clonePageTree(source.pages),
+    };
+
+    setWorlds((prev) => [...prev, duplicate]);
+    setActiveWorldId(duplicate.id);
+    setSelectedPageId(null);
+    setView('dashboard');
+    setIsWorldMenuOpen(false);
+    setWorldActionMenuId(null);
+    setEditingWorldId(duplicate.id);
+    setWorldNameDraft(copyName);
+  };
+
+  const handleDeleteWorld = (worldId: string) => {
+    if (typeof window !== 'undefined') {
+      const confirmed = window.confirm('Delete this world and all of its pages?');
+      if (!confirmed) {
+        setWorldActionMenuId(null);
+        return;
+      }
+    }
+
+    setWorlds((prev) => {
+      const remaining = prev.filter((world) => world.id !== worldId);
+
+      if (remaining.length === 0) {
+        const fallbackWorld: World = { id: generateId('world'), name: 'Untitled world', pages: [] };
+        setActiveWorldId(fallbackWorld.id);
+        setSelectedPageId(null);
+        setView('dashboard');
+        setIsWorldMenuOpen(false);
+        setWorldActionMenuId(null);
+        setEditingWorldId(null);
+        return [fallbackWorld];
+      }
+
+      if (worldId === activeWorldId) {
+        const nextWorld = remaining[0];
+        setActiveWorldId(nextWorld.id);
+        setSelectedPageId(null);
+        setView('dashboard');
+      }
+
+      return remaining;
+    });
+
+    setWorldActionMenuId(null);
+    setIsWorldMenuOpen(false);
+    setEditingWorldId(null);
+    setWorldNameDraft('');
   };
 
   const handleUpdatePageTitle = (pageId: string, title: string) => {
@@ -540,16 +785,68 @@ export default function Home() {
     );
   };
 
+  const handleEditorInput = () => {
+    if (!currentPageId) return;
+
+    const raw = editorRef.current?.innerHTML ?? '';
+    const sanitized = sanitizeEditorHtml(raw);
+
+    if (editorRef.current && raw !== sanitized) {
+      editorRef.current.innerHTML = sanitized;
+    }
+
+    isLocalEditRef.current = true;
+    handleUpdatePageContent(currentPageId, sanitized);
+  };
+
+  const handleToolbarAction = (command: string, value?: string) => {
+    if (!editorRef.current) return;
+
+    editorRef.current.focus();
+
+    if (typeof document !== 'undefined') {
+      document.execCommand(command, false, value ?? '');
+      window.setTimeout(() => {
+        handleEditorInput();
+      }, 0);
+    }
+  };
+
+  const handleManualSync = async () => {
+    if (saveTimerRef.current) {
+      window.clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = null;
+    }
+
+    if (!isOnline) {
+      setSaveStatus('offline');
+      pendingSaveRef.current = true;
+      return;
+    }
+
+    setSaveStatus('syncing');
+    await persistWorlds();
+    pendingSaveRef.current = false;
+    setSaveStatus('saved');
+  };
+
+  const handleWorldNameInput = (event: ChangeEvent<HTMLInputElement>) => {
+    setWorldNameDraft(event.target.value);
+  };
+
+  const handleWorldNameKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      commitWorldRename();
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      cancelWorldRename();
+    }
+  };
+
   const handleSelectPage = (pageId: string) => {
     setSelectedPageId(pageId);
     setView('page');
-  };
-
-  const handleToggleNode = (nodeId: string) => {
-    setExpandedNodes((prev) => ({
-      ...prev,
-      [nodeId]: !(prev[nodeId] ?? false),
-    }));
   };
 
   const handleShowDashboard = () => {
@@ -677,36 +974,147 @@ export default function Home() {
     </div>
   );
 
-  const renderPageEditor = () => (
-    <div className="flex flex-col gap-8">
-      <div className="rounded-3xl border border-white/10 bg-gradient-to-br from-white/10 via-white/5 to-transparent p-8">
-        <input
-          className="w-full bg-transparent text-3xl font-semibold text-slate-50 outline-none placeholder:text-slate-500"
-          value={selectedPage?.title ?? ''}
-          onChange={(event) => selectedPage && handleUpdatePageTitle(selectedPage.id, event.target.value)}
-          placeholder="Untitled page"
-        />
-        <p className="mt-2 text-sm text-slate-400">
-          Draft lore, collect reference notes, and stitch together the threads of your universe.
-        </p>
-      </div>
+  const renderPageEditor = () => {
+    if (!currentPageId) {
+      return (
+        <div className="flex h-full flex-col items-center justify-center rounded-3xl border border-dashed border-white/10 bg-slate-950/60 p-12 text-center text-slate-300">
+          <p className="text-lg font-semibold text-slate-100">Select a page to begin writing.</p>
+          <p className="mt-2 text-sm text-slate-400">
+            Choose a page from the index or create a new one to unlock the editor.
+          </p>
+        </div>
+      );
+    }
 
-      <div className="flex flex-col gap-6 rounded-3xl border border-white/10 bg-slate-950/60 p-8">
-        <textarea
-          className="h-[420px] w-full resize-none rounded-2xl border border-white/10 bg-slate-950/80 px-5 py-4 text-sm leading-relaxed text-slate-200 outline-none transition focus:border-indigo-400/50 focus:ring-2 focus:ring-indigo-400/30"
-          value={selectedPage?.content ?? ''}
-          onChange={(event) => selectedPage && handleUpdatePageContent(selectedPage.id, event.target.value)}
-          placeholder="Begin weaving the story of this page..."
-        />
-        <div className="flex flex-wrap items-center justify-between gap-3 text-[11px] uppercase tracking-[0.28em] text-slate-400">
-          <span>Markdown friendly · Auto-saved locally</span>
-          <button className="inline-flex items-center gap-2 rounded-2xl border border-white/10 px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.28em] text-indigo-100 transition hover:border-indigo-400/50">
-            Export page
-          </button>
+    const toolbarButtons: { label: string; command: string; value?: string; icon: JSX.Element }[] = [
+      {
+        label: 'Bold',
+        command: 'bold',
+        icon: (
+          <svg aria-hidden="true" viewBox="0 0 20 20" className="h-4 w-4" fill="currentColor">
+            <path d="M6 4.25a.75.75 0 0 1 .75-.75h4a3.25 3.25 0 0 1 1.8 5.96A3.5 3.5 0 0 1 11 16H6.75a.75.75 0 0 1-.75-.75V4.25Zm1.5.75v4h3.25a1.75 1.75 0 1 0 0-3.5H7.5Zm0 5.5v3.5H11a2 2 0 1 0 0-4H7.5Z" />
+          </svg>
+        ),
+      },
+      {
+        label: 'Italic',
+        command: 'italic',
+        icon: (
+          <svg aria-hidden="true" viewBox="0 0 20 20" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.6">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M9 4h6M5 16h6M11 4 9 16" />
+          </svg>
+        ),
+      },
+      {
+        label: 'Underline',
+        command: 'underline',
+        icon: (
+          <svg aria-hidden="true" viewBox="0 0 20 20" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.6">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M6 4v5a4 4 0 0 0 8 0V4" />
+            <path strokeLinecap="round" strokeLinejoin="round" d="M4 16h12" />
+          </svg>
+        ),
+      },
+      {
+        label: 'Heading 1',
+        command: 'formatBlock',
+        value: 'h1',
+        icon: (
+          <span className="text-sm font-semibold">H1</span>
+        ),
+      },
+      {
+        label: 'Heading 2',
+        command: 'formatBlock',
+        value: 'h2',
+        icon: (
+          <span className="text-sm font-semibold">H2</span>
+        ),
+      },
+      {
+        label: 'Bulleted list',
+        command: 'insertUnorderedList',
+        icon: (
+          <svg aria-hidden="true" viewBox="0 0 20 20" className="h-4 w-4" fill="currentColor">
+            <path d="M4 5.5a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3ZM4 11.5a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3ZM7 6h9v2H7V6Zm0 6h9v2H7v-2Z" />
+          </svg>
+        ),
+      },
+      {
+        label: 'Numbered list',
+        command: 'insertOrderedList',
+        icon: (
+          <svg aria-hidden="true" viewBox="0 0 20 20" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.5">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 6H6v4h-.75M4.5 14h1.5m-1.5 0H6m0 0v1H4.5M9 6h7v2H9V6Zm0 6h7v2H9v-2Z" />
+          </svg>
+        ),
+      },
+      {
+        label: 'Quote',
+        command: 'formatBlock',
+        value: 'blockquote',
+        icon: (
+          <svg aria-hidden="true" viewBox="0 0 20 20" className="h-4 w-4" fill="currentColor">
+            <path d="M6.5 5A2.5 2.5 0 0 0 4 7.5v5A2.5 2.5 0 0 0 6.5 15H7v-3H5.5v-1A1.5 1.5 0 0 1 7 9.5V5h-.5Zm7 0A2.5 2.5 0 0 0 11 7.5v5A2.5 2.5 0 0 0 13.5 15H14v-3h-1.5v-1A1.5 1.5 0 0 1 14 9.5V5h-.5Z" />
+          </svg>
+        ),
+      },
+    ];
+
+    return (
+      <div className="flex flex-col gap-8">
+        <div className="rounded-3xl border border-white/10 bg-gradient-to-br from-white/10 via-white/5 to-transparent p-8">
+          <input
+            className="w-full bg-transparent text-3xl font-semibold text-slate-50 outline-none placeholder:text-slate-500"
+            value={editorTitle}
+            onChange={(event) => {
+              setEditorTitle(event.target.value);
+              handleUpdatePageTitle(currentPageId, event.target.value);
+            }}
+            placeholder="Untitled page"
+          />
+          <p className="mt-2 text-sm text-slate-400">
+            Draft lore, collect reference notes, and stitch together the threads of your universe.
+          </p>
+        </div>
+
+        <div className="flex flex-col gap-5 rounded-3xl border border-white/10 bg-slate-950/60 p-8">
+          <div className="flex flex-wrap items-center gap-2">
+                {toolbarButtons.map((button) => (
+                  <button
+                    key={button.label}
+                    type="button"
+                    onClick={() => handleToolbarAction(button.command, button.value)}
+                className="inline-flex h-9 items-center justify-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 text-xs font-semibold uppercase tracking-[0.28em] text-slate-200 transition hover:-translate-y-0.5 hover:border-indigo-300/60 hover:text-indigo-100"
+                aria-label={button.label}
+              >
+                {button.icon}
+              </button>
+            ))}
+          </div>
+
+          <div
+            ref={editorRef}
+            className="min-h-[420px] rounded-2xl border border-white/10 bg-slate-950/80 px-5 py-4 text-base leading-relaxed text-slate-200 outline-none transition focus-within:border-indigo-400/50 focus-within:ring-2 focus-within:ring-indigo-400/30"
+            contentEditable
+            suppressContentEditableWarning
+            onInput={handleEditorInput}
+            onBlur={handleEditorInput}
+            data-placeholder="Begin weaving the story of this page..."
+            role="textbox"
+            aria-multiline="true"
+          />
+
+          <div className="flex flex-wrap items-center justify-between gap-3 text-xs uppercase tracking-[0.28em] text-slate-400">
+            <span>Rich text · Live autosave</span>
+            <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] font-semibold text-indigo-100">
+              {syncStatusLabel}
+            </span>
+          </div>
         </div>
       </div>
-    </div>
-  );
+    );
+  };
 
   const renderLoading = () => (
     <div className="relative min-h-screen text-slate-100">
@@ -977,14 +1385,45 @@ export default function Home() {
             </div>
 
             <div className="flex items-center gap-3">
-              <div className="hidden sm:block">
-                <p className="text-sm font-medium text-slate-300">{activeWorld?.name ?? 'No world selected'}</p>
+              <div className="hidden sm:flex items-center">
+                {editingWorldId === activeWorld?.id ? (
+                  <input
+                    ref={editingWorldId === activeWorld?.id ? worldNameInputRef : null}
+                    value={worldNameDraft}
+                    onChange={handleWorldNameInput}
+                    onKeyDown={handleWorldNameKeyDown}
+                    onBlur={commitWorldRename}
+                    className="w-full max-w-xs rounded-xl border border-white/10 bg-white/5 px-3 py-1.5 text-sm font-medium text-slate-100 outline-none focus:border-indigo-400/60 focus:ring-2 focus:ring-indigo-400/30"
+                    placeholder="Untitled world"
+                  />
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => activeWorld && startWorldRename(activeWorld)}
+                    className="rounded-xl px-2 py-1 text-sm font-medium text-slate-300 transition hover:bg-white/5 hover:text-slate-100"
+                  >
+                    {activeWorld?.name ?? 'No world selected'}
+                  </button>
+                )}
               </div>
 
               <div className="relative">
                 <button
                   type="button"
-                  onClick={() => setIsWorldMenuOpen((prev) => !prev)}
+                  onClick={() =>
+                    setIsWorldMenuOpen((prev) => {
+                      const next = !prev;
+                      if (!next) {
+                        if (editingWorldId) {
+                          commitWorldRename();
+                        }
+                        setWorldActionMenuId(null);
+                        setEditingWorldId(null);
+                        setWorldNameDraft('');
+                      }
+                      return next;
+                    })
+                  }
                   className="inline-flex h-10 w-10 items-center justify-center rounded-2xl border border-white/10 bg-white/5 text-slate-200 transition hover:-translate-y-0.5 hover:border-indigo-400/40 hover:text-indigo-200"
                   aria-haspopup="menu"
                   aria-expanded={isWorldMenuOpen}
@@ -996,29 +1435,109 @@ export default function Home() {
                 </button>
 
                 {isWorldMenuOpen ? (
-                  <div className="absolute left-0 top-12 z-20 w-64 rounded-2xl border border-white/10 bg-slate-900/95 p-3 shadow-xl">
+                  <div className="absolute left-0 top-12 z-20 w-72 rounded-2xl border border-white/10 bg-slate-900/95 p-3 shadow-xl">
                     <p className="px-2 pb-2 text-[11px] uppercase tracking-[0.28em] text-slate-400">Worlds</p>
                     <ul className="space-y-1 text-sm">
-                      {worlds.map((world) => (
-                        <li key={world.id}>
-                          <button
-                            type="button"
-                            onClick={() => handleSelectWorld(world.id)}
-                            className={`flex w-full items-center justify-between rounded-xl px-3 py-2 transition ${
-                              world.id === activeWorld?.id
-                                ? 'bg-indigo-500/20 text-indigo-100'
-                                : 'text-slate-300 hover:bg-white/5 hover:text-slate-100'
-                            }`}
-                          >
-                            <span className="truncate">{world.name}</span>
-                            {world.id === activeWorld?.id ? (
-                              <svg aria-hidden="true" viewBox="0 0 20 20" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.5">
-                                <path strokeLinecap="round" strokeLinejoin="round" d="m5.5 10 3 3 6-6" />
-                              </svg>
+                      {worlds.map((world) => {
+                        const isSelected = world.id === activeWorld?.id;
+                        const isEditing = editingWorldId === world.id;
+
+                        return (
+                          <li key={world.id} className="relative">
+                            <div
+                              className={`flex items-center gap-2 rounded-xl border border-transparent px-2 py-2 ${
+                                isSelected
+                                  ? 'border-indigo-400/40 bg-indigo-500/20 text-indigo-100'
+                                  : 'text-slate-300 hover:border-white/10 hover:bg-white/5 hover:text-slate-100'
+                              }`}
+                            >
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setWorldActionMenuId((prev) => (prev === world.id ? null : world.id))
+                                }
+                                className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-white/10 text-slate-300 transition hover:border-indigo-300/60 hover:text-indigo-200"
+                                aria-haspopup="menu"
+                                aria-expanded={worldActionMenuId === world.id}
+                                aria-label={`World options for ${world.name}`}
+                              >
+                                <svg aria-hidden="true" viewBox="0 0 20 20" className="h-4 w-4" fill="currentColor">
+                                  <path d="M4 10a1.5 1.5 0 1 1 3 0 1.5 1.5 0 0 1-3 0Zm4.5 0a1.5 1.5 0 1 1 3 0 1.5 1.5 0 0 1-3 0Zm4.5 0a1.5 1.5 0 1 1 3 0 1.5 1.5 0 0 1-3 0Z" />
+                                </svg>
+                              </button>
+
+                              {isEditing ? (
+                                <input
+                                  ref={isEditing ? worldNameInputRef : null}
+                                  value={worldNameDraft}
+                                  onChange={handleWorldNameInput}
+                                  onKeyDown={handleWorldNameKeyDown}
+                                  onBlur={commitWorldRename}
+                                  className="flex-1 rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-sm text-slate-100 outline-none focus:border-indigo-400/60 focus:ring-2 focus:ring-indigo-400/30"
+                                  placeholder="Untitled world"
+                                />
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={() => handleSelectWorld(world.id)}
+                                  className="flex-1 truncate text-left"
+                                >
+                                  {world.name}
+                                </button>
+                              )}
+
+                              {isSelected ? (
+                                <svg aria-hidden="true" viewBox="0 0 20 20" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.5">
+                                  <path strokeLinecap="round" strokeLinejoin="round" d="m5.5 10 3 3 6-6" />
+                                </svg>
+                              ) : null}
+                            </div>
+
+                            {worldActionMenuId === world.id ? (
+                              <div className="absolute left-0 top-full z-30 mt-2 w-48 rounded-xl border border-white/10 bg-slate-900/95 p-2 shadow-2xl">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    startWorldRename(world);
+                                    setWorldActionMenuId(null);
+                                  }}
+                                  className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-200 transition hover:bg-white/5 hover:text-indigo-100"
+                                >
+                                  <svg aria-hidden="true" viewBox="0 0 20 20" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.5">
+                                    <path strokeLinecap="round" strokeLinejoin="round" d="M4 13.5V16h2.5l7.4-7.4-2.5-2.5L4 13.5Z" />
+                                    <path strokeLinecap="round" strokeLinejoin="round" d="m12.9 5.6 1.5-1.5a1.5 1.5 0 0 1 2.1 2.1l-1.5 1.5" />
+                                  </svg>
+                                  Rename world
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    handleDuplicateWorld(world.id);
+                                    setWorldActionMenuId(null);
+                                  }}
+                                  className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-200 transition hover:bg-white/5 hover:text-indigo-100"
+                                >
+                                  <svg aria-hidden="true" viewBox="0 0 20 20" className="h-4 w-4" fill="currentColor">
+                                    <path d="M6 3.75A1.75 1.75 0 0 1 7.75 2h6.5A1.75 1.75 0 0 1 16 3.75v6.5A1.75 1.75 0 0 1 14.25 12h-6.5A1.75 1.75 0 0 1 6 10.25v-6.5Zm-2 4.5A1.75 1.75 0 0 1 5.75 6.5H6v3.75A3.25 3.25 0 0 0 9.25 13.5H13v.75A1.75 1.75 0 0 1 11.25 16h-6.5A1.75 1.75 0 0 1 3 14.25v-6.5Z" />
+                                  </svg>
+                                  Duplicate world
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleDeleteWorld(world.id)}
+                                  className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-rose-200 transition hover:bg-rose-500/10 hover:text-rose-100"
+                                >
+                                  <svg aria-hidden="true" viewBox="0 0 20 20" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.5">
+                                    <path strokeLinecap="round" strokeLinejoin="round" d="M7 4h6m-7 2h8l-.6 9.4A1.5 1.5 0 0 1 11.9 17H8.1a1.5 1.5 0 0 1-1.49-1.6L6 6Z" />
+                                    <path strokeLinecap="round" strokeLinejoin="round" d="M8.5 9.5v4m3-4v4" />
+                                  </svg>
+                                  Delete world
+                                </button>
+                              </div>
                             ) : null}
-                          </button>
-                        </li>
-                      ))}
+                          </li>
+                        );
+                      })}
                     </ul>
                     <button
                       type="button"
@@ -1033,21 +1552,6 @@ export default function Home() {
                   </div>
                 ) : null}
               </div>
-
-              <button
-                type="button"
-                onClick={() => setIsSidebarOpen((prev) => !prev)}
-                className="inline-flex h-10 w-10 items-center justify-center rounded-2xl border border-white/10 bg-white/5 text-slate-200 transition hover:-translate-y-0.5 hover:border-indigo-400/40 hover:text-indigo-200"
-                aria-label={isSidebarOpen ? 'Hide sidebar' : 'Show sidebar'}
-              >
-                <svg aria-hidden="true" viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.5">
-                  {isSidebarOpen ? (
-                    <path strokeLinecap="round" strokeLinejoin="round" d="m15 6-6 6 6 6" />
-                  ) : (
-                    <path strokeLinecap="round" strokeLinejoin="round" d="m9 6 6 6-6 6" />
-                  )}
-                </svg>
-              </button>
             </div>
           </div>
 
@@ -1061,11 +1565,26 @@ export default function Home() {
                 ⌘ K
               </span>
             </div>
-            <button className="inline-flex items-center gap-2 rounded-2xl border border-indigo-300/40 bg-indigo-500/20 px-4 py-2 text-sm font-medium text-indigo-100 transition hover:-translate-y-0.5 hover:bg-indigo-500/30">
-              <svg aria-hidden="true" viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.5">
-                <path strokeLinecap="round" strokeLinejoin="round" d="m5.75 12 3.5 3.5 9-9" />
-              </svg>
-              Sync now
+            <button
+              type="button"
+              onClick={handleManualSync}
+              className={`inline-flex items-center gap-2 rounded-2xl border px-4 py-2 text-sm font-medium transition hover:-translate-y-0.5 ${syncButtonClasses}`}
+            >
+              {saveStatus === 'saving' || saveStatus === 'syncing' ? (
+                <span className="flex h-4 w-4 items-center justify-center">
+                  <span className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                </span>
+              ) : saveStatus === 'offline' ? (
+                <svg aria-hidden="true" viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.5">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M3 12a7 7 0 0 1 11.95-4.95M5 19h14a3 3 0 0 0 0-6h-.26" />
+                  <path strokeLinecap="round" strokeLinejoin="round" d="m3 3 18 18" />
+                </svg>
+              ) : (
+                <svg aria-hidden="true" viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.5">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="m5.75 12 3.5 3.5 9-9" />
+                </svg>
+              )}
+              <span>{syncStatusLabel}</span>
             </button>
             <button className="inline-flex h-10 w-10 items-center justify-center rounded-2xl border border-white/10 bg-white/10 text-slate-200 transition hover:-translate-y-0.5 hover:border-indigo-400/40 hover:text-indigo-200">
               <span className="sr-only">Open notifications</span>
@@ -1090,11 +1609,7 @@ export default function Home() {
         </header>
 
         <div className="flex flex-1 flex-col lg:flex-row">
-          <aside
-            className={`${
-              isSidebarOpen ? 'lg:translate-x-0 lg:opacity-100' : 'lg:-translate-x-full lg:opacity-0 lg:pointer-events-none'
-            } hidden w-full max-w-xs flex-col justify-between border-r border-white/10 bg-slate-950/60 px-6 pb-8 pt-10 transition-all duration-300 ease-out lg:flex`}
-          >
+          <aside className="hidden w-full max-w-xs flex-col justify-between border-r border-white/10 bg-slate-950/60 px-6 pb-8 pt-10 lg:flex">
             <div className="space-y-8">
               <div className="flex items-center gap-3 rounded-2xl border border-white/10 bg-slate-900/70 px-3 py-3">
                 <div className="flex h-10 w-10 items-center justify-center overflow-hidden rounded-2xl bg-gradient-to-br from-indigo-400 via-indigo-500 to-violet-500 text-base font-semibold text-white">
@@ -1157,10 +1672,8 @@ export default function Home() {
                 {activeWorld && activeWorld.pages.length > 0 ? (
                   <PageTree
                     nodes={activeWorld.pages}
-                    expanded={expandedNodes}
                     selectedId={selectedPageId}
                     onSelect={handleSelectPage}
-                    onToggle={handleToggleNode}
                     onAddChild={handleAddPage}
                   />
                 ) : (
