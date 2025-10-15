@@ -1,16 +1,39 @@
 'use client';
 
 import Image from 'next/image';
-import type { ChangeEvent, FormEvent, KeyboardEvent } from 'react';
+import type { ChangeEvent, DragEvent, FormEvent, KeyboardEvent } from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { User } from 'firebase/auth';
 
 import { loadFirebase } from '@/lib/firebase/client';
 
+type CollaboratorRole = 'Owner' | 'Editor' | 'Viewer';
+
+type WorldCollaborator = {
+  id: string;
+  name: string;
+  email: string;
+  role: CollaboratorRole;
+  avatarColor: string;
+};
+
+type ActivityAction = 'create' | 'update' | 'duplicate' | 'delete' | 'move' | 'share';
+
+type ActivityEntry = {
+  id: string;
+  action: ActivityAction;
+  target: string;
+  context?: string;
+  actorId: string;
+  actorName: string;
+  timestamp: string;
+};
+
 type PageNode = {
   id: string;
   title: string;
   content: string;
+  favorite: boolean;
   children: PageNode[];
 };
 
@@ -18,6 +41,9 @@ type World = {
   id: string;
   name: string;
   pages: PageNode[];
+  ownerId: string;
+  collaborators: WorldCollaborator[];
+  activity: ActivityEntry[];
 };
 
 type FirebaseBundle = NonNullable<Awaited<ReturnType<typeof loadFirebase>>>;
@@ -83,6 +109,89 @@ const templates = [
 ];
 
 const STORAGE_KEY = 'enfield-worlds';
+const ACTIVITY_LIMIT = 40;
+
+const AVATAR_COLORS = ['#6366f1', '#38bdf8', '#f472b6', '#f97316', '#22d3ee', '#34d399', '#eab308'];
+
+const hashString = (value: string) => {
+  let hash = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = (hash << 5) - hash + value.charCodeAt(index);
+    hash |= 0;
+  }
+  return Math.abs(hash);
+};
+
+const getAvatarColor = (seed: string) => AVATAR_COLORS[hashString(seed || 'enfield')] ?? AVATAR_COLORS[0];
+
+const toTitleCase = (value: string) =>
+  value
+    .split(/[\s._-]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+
+const appendActivity = (entries: ActivityEntry[], entry: ActivityEntry) =>
+  [entry, ...entries].slice(0, ACTIVITY_LIMIT);
+
+const summarizeActivity = (entry: ActivityEntry) => {
+  switch (entry.action) {
+    case 'create':
+      return `Created “${entry.target}”`;
+    case 'update':
+      return `Updated “${entry.target}”`;
+    case 'duplicate':
+      return `Duplicated “${entry.target}”`;
+    case 'delete':
+      return `Deleted “${entry.target}”`;
+    case 'move':
+      return `Moved “${entry.target}”`;
+    case 'share':
+      return `Updated access for ${entry.target}`;
+    default:
+      return entry.target;
+  }
+};
+
+const formatRelativeTime = (isoTimestamp: string) => {
+  const date = new Date(isoTimestamp);
+  if (Number.isNaN(date.getTime())) {
+    return 'Just now';
+  }
+
+  const diffMs = Date.now() - date.getTime();
+  if (diffMs < 60_000) {
+    return 'Just now';
+  }
+
+  const minutes = Math.floor(diffMs / 60_000);
+  if (minutes < 60) {
+    return `${minutes}m ago`;
+  }
+
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) {
+    return `${hours}h ago`;
+  }
+
+  const days = Math.floor(hours / 24);
+  if (days < 7) {
+    return `${days}d ago`;
+  }
+
+  const weeks = Math.floor(days / 7);
+  if (weeks < 4) {
+    return `${weeks}w ago`;
+  }
+
+  const months = Math.floor(days / 30);
+  if (months < 12) {
+    return `${months}mo ago`;
+  }
+
+  const years = Math.floor(days / 365);
+  return `${years}y ago`;
+};
 
 const generateId = (prefix: string) => {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
@@ -114,6 +223,89 @@ const ensureHtmlContent = (content: string) => {
 
 const sanitizeEditorHtml = (html: string) => html.replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, '');
 
+const normalizePageTree = (nodes: PageNode[] | undefined): PageNode[] =>
+  (nodes ?? []).map((node) => ({
+    ...node,
+    favorite: node.favorite ?? false,
+    children: normalizePageTree(node.children ?? []),
+  }));
+
+const normalizeCollaborators = (
+  worldId: string,
+  collaborators: WorldCollaborator[] | undefined,
+  ownerId: string | undefined,
+  worldName: string,
+) => {
+  const normalized = (collaborators ?? []).map((collaborator, index) => {
+    const collaboratorId = collaborator?.id ?? `${worldId}-collaborator-${index}`;
+    return {
+      id: collaboratorId,
+      name: collaborator?.name ?? `Collaborator ${index + 1}`,
+      email: collaborator?.email ?? 'collaborator@example.com',
+      role: collaborator?.role ?? (collaboratorId === ownerId ? 'Owner' : 'Editor'),
+      avatarColor: collaborator?.avatarColor ?? getAvatarColor(collaboratorId),
+    };
+  });
+
+  let resolvedOwnerId =
+    ownerId && normalized.some((collaborator) => collaborator.id === ownerId)
+      ? ownerId
+      : normalized.find((collaborator) => collaborator.role === 'Owner')?.id;
+
+  if (!resolvedOwnerId) {
+    const fallbackId = ownerId ?? `${worldId}-owner`;
+    normalized.unshift({
+      id: fallbackId,
+      name: `${worldName} Owner`,
+      email: 'owner@example.com',
+      role: 'Owner',
+      avatarColor: getAvatarColor(fallbackId),
+    });
+    resolvedOwnerId = fallbackId;
+  } else {
+    normalized.forEach((collaborator) => {
+      if (collaborator.id === resolvedOwnerId) {
+        collaborator.role = 'Owner';
+      }
+    });
+  }
+
+  return {
+    collaborators: normalized,
+    ownerId: resolvedOwnerId,
+  };
+};
+
+const normalizeActivity = (activity: ActivityEntry[] | undefined): ActivityEntry[] =>
+  (activity ?? [])
+    .map((entry) => ({
+      id: entry?.id ?? generateId('activity'),
+      action: entry?.action ?? 'update',
+      target: entry?.target ?? 'Entry',
+      context: entry?.context ?? '',
+      actorId: entry?.actorId ?? 'system',
+      actorName: entry?.actorName ?? 'System',
+      timestamp:
+        typeof entry?.timestamp === 'string' && entry.timestamp ? entry.timestamp : new Date().toISOString(),
+    }))
+    .slice(0, ACTIVITY_LIMIT);
+
+const normalizeWorlds = (worlds: Partial<World>[]): World[] =>
+  worlds.map((world) => {
+    const worldId = world.id ?? generateId('world');
+    const worldName = world.name ?? 'Untitled world';
+    const { collaborators, ownerId } = normalizeCollaborators(worldId, world.collaborators, world.ownerId, worldName);
+
+    return {
+      id: worldId,
+      name: worldName,
+      pages: normalizePageTree(world.pages ?? []),
+      ownerId,
+      collaborators,
+      activity: normalizeActivity(world.activity),
+    };
+  });
+
 const loadWorldsFromStorage = (): World[] => {
   if (typeof window !== 'undefined') {
     const stored = window.localStorage.getItem(STORAGE_KEY);
@@ -121,7 +313,7 @@ const loadWorldsFromStorage = (): World[] => {
       try {
         const parsed = JSON.parse(stored) as World[];
         if (Array.isArray(parsed)) {
-          return parsed;
+          return normalizeWorlds(parsed);
         }
       } catch (error) {
         console.warn('Unable to parse stored worlds, falling back to defaults.', error);
@@ -129,30 +321,86 @@ const loadWorldsFromStorage = (): World[] => {
     }
   }
 
-  return initialWorlds;
+  return normalizeWorlds(initialWorlds);
 };
 
 const initialWorlds: World[] = [
   {
     id: 'world-aerie',
     name: 'The Aerie Chronicles',
+    ownerId: 'user-celeste',
+    collaborators: [
+      {
+        id: 'user-celeste',
+        name: 'Celeste Mira',
+        email: 'celeste@enfield.studio',
+        role: 'Owner',
+        avatarColor: getAvatarColor('user-celeste'),
+      },
+      {
+        id: 'user-jalen',
+        name: 'Jalen Orin',
+        email: 'jalen@enfield.studio',
+        role: 'Editor',
+        avatarColor: getAvatarColor('user-jalen'),
+      },
+      {
+        id: 'user-sera',
+        name: 'Sera Kith',
+        email: 'sera@enfield.studio',
+        role: 'Viewer',
+        avatarColor: getAvatarColor('user-sera'),
+      },
+    ],
+    activity: [
+      {
+        id: 'activity-aerie-1',
+        action: 'update',
+        target: 'Lore bible',
+        context: 'Jalen refined the seasonal rituals section.',
+        actorId: 'user-jalen',
+        actorName: 'Jalen Orin',
+        timestamp: '2024-10-04T14:22:00.000Z',
+      },
+      {
+        id: 'activity-aerie-2',
+        action: 'move',
+        target: 'Enfield myths',
+        context: 'Celeste reorganized the myth sub-pages.',
+        actorId: 'user-celeste',
+        actorName: 'Celeste Mira',
+        timestamp: '2024-10-02T17:45:00.000Z',
+      },
+      {
+        id: 'activity-aerie-3',
+        action: 'create',
+        target: 'Skyward Choir',
+        context: 'Sera proposed a new faction entry.',
+        actorId: 'user-sera',
+        actorName: 'Sera Kith',
+        timestamp: '2024-09-27T09:05:00.000Z',
+      },
+    ],
     pages: [
       {
         id: 'page-overview',
         title: 'World overview',
         content:
           'A windswept archipelago held aloft by luminous crystals. The fox-winged Enfield guides dreamers between islands where forgotten gods still whisper.',
+        favorite: false,
         children: [
           {
             id: 'page-lore-bible',
             title: 'Lore bible',
             content:
               'Foundational myths, seasonal rituals, and the Enfield creation story. Document how the winged fox chose its heralds.',
+            favorite: false,
             children: [
               {
                 id: 'page-enfield-myths',
                 title: 'Enfield myths',
                 content: 'Legends collected from temple murals and sky-ship sailors.',
+                favorite: false,
                 children: [],
               },
             ],
@@ -161,11 +409,13 @@ const initialWorlds: World[] = [
             id: 'page-factions',
             title: 'Factions',
             content: 'The Skyward Choir, the Crystal Veil, and clandestine cartographers.',
+            favorite: false,
             children: [
               {
                 id: 'page-choir',
                 title: 'Skyward Choir',
                 content: 'A chorus of mystics who map the winds with song.',
+                favorite: false,
                 children: [],
               },
             ],
@@ -176,11 +426,13 @@ const initialWorlds: World[] = [
         id: 'page-characters',
         title: 'Characters',
         content: 'Profiles for protagonists, antagonists, and pivotal supporting casts.',
+        favorite: false,
         children: [
           {
             id: 'page-protagonists',
             title: 'Protagonists',
             content: 'Heroic figures tied to the Enfield lineage.',
+            favorite: false,
             children: [],
           },
         ],
@@ -189,6 +441,7 @@ const initialWorlds: World[] = [
         id: 'page-locations',
         title: 'Locations',
         content: 'Document each floating isle, climate, and cultural artifact.',
+        favorite: false,
         children: [],
       },
     ],
@@ -196,11 +449,49 @@ const initialWorlds: World[] = [
   {
     id: 'world-seabound',
     name: 'Seabound Requiem',
+    ownerId: 'user-naila',
+    collaborators: [
+      {
+        id: 'user-naila',
+        name: 'Naila Crest',
+        email: 'naila@enfield.studio',
+        role: 'Owner',
+        avatarColor: getAvatarColor('user-naila'),
+      },
+      {
+        id: 'user-kael',
+        name: 'Kael Rowe',
+        email: 'kael@enfield.studio',
+        role: 'Editor',
+        avatarColor: getAvatarColor('user-kael'),
+      },
+    ],
+    activity: [
+      {
+        id: 'activity-sea-1',
+        action: 'create',
+        target: 'Tidebinding rites',
+        context: 'Kael outlined the mage initiation ceremony.',
+        actorId: 'user-kael',
+        actorName: 'Kael Rowe',
+        timestamp: '2024-10-01T12:18:00.000Z',
+      },
+      {
+        id: 'activity-sea-2',
+        action: 'update',
+        target: 'World overview',
+        context: 'Naila updated the opening synopsis.',
+        actorId: 'user-naila',
+        actorName: 'Naila Crest',
+        timestamp: '2024-09-29T08:52:00.000Z',
+      },
+    ],
     pages: [
       {
         id: 'page-sea-overview',
         title: 'World overview',
         content: 'A storm-lashed oceanic realm ruled by tide-binding mages.',
+        favorite: false,
         children: [],
       },
     ],
@@ -211,6 +502,7 @@ const createPage = (title = 'Untitled page'): PageNode => ({
   id: generateId('page'),
   title,
   content: '',
+  favorite: false,
   children: [],
 });
 
@@ -262,6 +554,133 @@ const updatePageInTree = (
   return changed ? nextNodes : nodes;
 };
 
+const removePageFromTree = (nodes: PageNode[], pageId: string): { nodes: PageNode[]; removed: PageNode | null } => {
+  let removed: PageNode | null = null;
+  let changed = false;
+  const nextNodes: PageNode[] = [];
+
+  for (const node of nodes) {
+    if (removed) {
+      nextNodes.push(node);
+      continue;
+    }
+
+    if (node.id === pageId) {
+      removed = node;
+      changed = true;
+      continue;
+    }
+
+    const result = removePageFromTree(node.children, pageId);
+    if (result.removed) {
+      removed = result.removed;
+      changed = true;
+      nextNodes.push({ ...node, children: result.nodes });
+    } else {
+      nextNodes.push(node);
+    }
+  }
+
+  return { nodes: changed ? nextNodes : nodes, removed };
+};
+
+const insertPageBefore = (
+  nodes: PageNode[],
+  targetId: string,
+  page: PageNode,
+): { nodes: PageNode[]; inserted: boolean } => {
+  let inserted = false;
+  const nextNodes: PageNode[] = [];
+
+  for (const node of nodes) {
+    if (!inserted && node.id === targetId) {
+      nextNodes.push(page);
+      nextNodes.push(node);
+      inserted = true;
+      continue;
+    }
+
+    const result = insertPageBefore(node.children, targetId, page);
+    if (result.inserted) {
+      nextNodes.push({ ...node, children: result.nodes });
+      inserted = true;
+    } else {
+      nextNodes.push(node);
+    }
+  }
+
+  return { nodes: inserted ? nextNodes : nodes, inserted };
+};
+
+const insertPageAfter = (
+  nodes: PageNode[],
+  targetId: string,
+  page: PageNode,
+): { nodes: PageNode[]; inserted: boolean } => {
+  let inserted = false;
+  const nextNodes: PageNode[] = [];
+
+  for (const node of nodes) {
+    if (!inserted && node.id === targetId) {
+      nextNodes.push(node);
+      nextNodes.push(page);
+      inserted = true;
+      continue;
+    }
+
+    const result = insertPageAfter(node.children, targetId, page);
+    if (result.inserted) {
+      nextNodes.push({ ...node, children: result.nodes });
+      inserted = true;
+    } else {
+      nextNodes.push(node);
+    }
+  }
+
+  return { nodes: inserted ? nextNodes : nodes, inserted };
+};
+
+const movePageBefore = (nodes: PageNode[], sourceId: string, targetId: string): PageNode[] => {
+  if (sourceId === targetId) return nodes;
+
+  const removal = removePageFromTree(nodes, sourceId);
+  if (!removal.removed) {
+    return nodes;
+  }
+
+  const insertion = insertPageBefore(removal.nodes, targetId, removal.removed);
+  if (insertion.inserted) {
+    return insertion.nodes;
+  }
+
+  const fallbackInsertion = insertPageBefore(removal.nodes, sourceId, removal.removed);
+  if (fallbackInsertion.inserted) {
+    return fallbackInsertion.nodes;
+  }
+
+  return [...removal.nodes, removal.removed];
+};
+
+const pageContainsId = (node: PageNode, pageId: string): boolean => {
+  if (node.id === pageId) {
+    return true;
+  }
+
+  return node.children.some((child) => pageContainsId(child, pageId));
+};
+
+const isDescendant = (nodes: PageNode[], ancestorId: string, descendantId: string): boolean => {
+  const ancestor = findPageInTree(nodes, ancestorId);
+  if (!ancestor) {
+    return false;
+  }
+
+  return ancestor.children.some((child) => pageContainsId(child, descendantId));
+};
+
+const flattenPages = (nodes: PageNode[]): PageNode[] =>
+  nodes.flatMap((node) => [node, ...flattenPages(node.children)]);
+
 const findPageInTree = (nodes: PageNode[], pageId: string | null): PageNode | null => {
   if (!pageId) return null;
 
@@ -284,6 +703,7 @@ const clonePageTree = (nodes: PageNode[]): PageNode[] =>
     id: generateId('page'),
     title: node.title,
     content: node.content,
+    favorite: node.favorite ?? false,
     children: clonePageTree(node.children),
   }));
 
@@ -292,23 +712,81 @@ type PageTreeProps = {
   selectedId: string | null;
   onSelect: (id: string) => void;
   onAddChild: (id: string) => void;
+  onToggleFavorite: (id: string) => void;
+  onCopyLink: (id: string) => void;
+  onDuplicate: (id: string) => void;
+  onDelete: (id: string) => void;
+  onStartRename: (id: string) => void;
+  onRenameChange: (value: string) => void;
+  onRenameCommit: () => void;
+  onRenameCancel: () => void;
+  editingPageId: string | null;
+  pageTitleDraft: string;
+  actionMenuId: string | null;
+  onOpenActionMenu: (id: string) => void;
+  onCloseActionMenu: () => void;
+  onDragStart: (id: string, event: DragEvent<HTMLDivElement>) => void;
+  onDragEnd: () => void;
+  onDrop: (targetId: string) => void;
+  draggedPageId: string | null;
   depth?: number;
 };
-function PageTree({ nodes, selectedId, onSelect, onAddChild, depth = 0 }: PageTreeProps) {
+function PageTree({
+  nodes,
+  selectedId,
+  onSelect,
+  onAddChild,
+  onToggleFavorite,
+  onCopyLink,
+  onDuplicate,
+  onDelete,
+  onStartRename,
+  onRenameChange,
+  onRenameCommit,
+  onRenameCancel,
+  editingPageId,
+  pageTitleDraft,
+  actionMenuId,
+  onOpenActionMenu,
+  onCloseActionMenu,
+  onDragStart,
+  onDragEnd,
+  onDrop,
+  draggedPageId,
+  depth = 0,
+}: PageTreeProps) {
   return (
     <ul className={depth === 0 ? 'space-y-1.5' : 'space-y-1.5 border-l border-white/5 pl-4'}>
       {nodes.map((node) => {
         const hasChildren = node.children.length > 0;
         const isSelected = node.id === selectedId;
+        const isEditing = node.id === editingPageId;
+        const isMenuOpen = actionMenuId === node.id;
+        const isFavorite = node.favorite;
+        const isDragging = draggedPageId === node.id;
 
         return (
-          <li key={node.id} className="space-y-1">
+          <li key={node.id} className="relative space-y-1">
             <div
               className={`group flex items-center gap-2 rounded-xl border border-transparent px-2 py-1.5 text-sm transition ${
                 isSelected
                   ? 'border-indigo-400/60 bg-indigo-500/20 text-indigo-100 shadow-[0_0_0_1px_rgba(129,140,248,0.25)]'
                   : 'text-slate-300 hover:border-white/10 hover:bg-white/5 hover:text-slate-100'
-              }`}
+              } ${isDragging ? 'opacity-70 ring-2 ring-indigo-400/50' : ''}`}
+              draggable
+              onDragStart={(event) => onDragStart(node.id, event)}
+              onDragOver={(event) => {
+                event.preventDefault();
+                event.dataTransfer.dropEffect = 'move';
+                event.stopPropagation();
+              }}
+              onDrop={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                onDrop(node.id);
+                onCloseActionMenu();
+              }}
+              onDragEnd={onDragEnd}
             >
               <span
                 className={`flex h-6 w-6 items-center justify-center rounded-lg border border-transparent text-xs ${
@@ -322,9 +800,16 @@ function PageTree({ nodes, selectedId, onSelect, onAddChild, depth = 0 }: PageTr
               <button
                 type="button"
                 onClick={() => onSelect(node.id)}
-                className="flex-1 truncate text-left"
+                className={`flex-1 truncate text-left ${isFavorite ? 'font-semibold text-indigo-100' : ''}`}
               >
-                {node.title}
+                <span className="flex items-center gap-1 truncate">
+                  {isFavorite ? (
+                    <svg aria-hidden="true" viewBox="0 0 20 20" className="h-3.5 w-3.5 text-amber-300" fill="currentColor">
+                      <path d="m10 2.4 2.4 4.86 5.36.78-3.88 3.78.92 5.34L10 14.8l-4.8 2.36.92-5.34-3.88-3.78 5.36-.78L10 2.4Z" />
+                    </svg>
+                  ) : null}
+                  <span className="truncate">{node.title}</span>
+                </span>
               </button>
 
               <button
@@ -337,7 +822,100 @@ function PageTree({ nodes, selectedId, onSelect, onAddChild, depth = 0 }: PageTr
                   <path d="M9 3a1 1 0 0 1 2 0v4h4a1 1 0 1 1 0 2h-4v4a1 1 0 1 1-2 0V9H5a1 1 0 1 1 0-2h4z" />
                 </svg>
               </button>
+
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  if (isMenuOpen) {
+                    onCloseActionMenu();
+                  } else {
+                    onOpenActionMenu(node.id);
+                  }
+                }}
+                className="inline-flex h-6 w-6 items-center justify-center rounded-lg border border-white/10 text-slate-300 transition hover:border-indigo-300/60 hover:text-indigo-200"
+                aria-haspopup="menu"
+                aria-expanded={isMenuOpen}
+                aria-label={`Page options for ${node.title}`}
+              >
+                <svg aria-hidden="true" viewBox="0 0 20 20" className="h-3.5 w-3.5" fill="currentColor">
+                  <path d="M4 10a1.5 1.5 0 1 1 3 0 1.5 1.5 0 0 1-3 0Zm4.5 0a1.5 1.5 0 1 1 3 0 1.5 1.5 0 0 1-3 0Zm4.5 0a1.5 1.5 0 1 1 3 0 1.5 1.5 0 0 1-3 0Z" />
+                </svg>
+              </button>
             </div>
+
+            {isMenuOpen ? (
+              <div className="absolute right-0 top-full z-20 mt-2 w-48 rounded-xl border border-white/10 bg-slate-900/95 p-2 shadow-2xl">
+                <button
+                  type="button"
+                  onClick={() => {
+                    onToggleFavorite(node.id);
+                    onCloseActionMenu();
+                  }}
+                  className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-200 transition hover:bg-white/5 hover:text-indigo-100"
+                >
+                  <svg aria-hidden="true" viewBox="0 0 20 20" className={`h-4 w-4 ${isFavorite ? 'text-amber-300' : ''}`} fill="currentColor">
+                    <path d="m10 2.5 2.3 4.66 5.14.75-3.72 3.63.88 5.12L10 14.77l-4.6 2.39.88-5.12-3.72-3.63 5.14-.75L10 2.5Z" />
+                  </svg>
+                  {isFavorite ? 'Unfavorite' : 'Favorite'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onCopyLink(node.id);
+                    onCloseActionMenu();
+                  }}
+                  className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-200 transition hover:bg-white/5 hover:text-indigo-100"
+                >
+                  <svg aria-hidden="true" viewBox="0 0 20 20" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.5">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M9 6.5A2.5 2.5 0 0 1 11.5 4H15a2.5 2.5 0 0 1 0 5h-1.5" />
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M11 13.5A2.5 2.5 0 0 1 8.5 16H5a2.5 2.5 0 0 1 0-5h1.5" />
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M7 10h6" />
+                  </svg>
+                  Copy link
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onStartRename(node.id);
+                    onCloseActionMenu();
+                  }}
+                  className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-200 transition hover:bg-white/5 hover:text-indigo-100"
+                >
+                  <svg aria-hidden="true" viewBox="0 0 20 20" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.5">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M4 13.5V16h2.5l7.4-7.4-2.5-2.5L4 13.5Z" />
+                    <path strokeLinecap="round" strokeLinejoin="round" d="m12.9 5.6 1.5-1.5a1.5 1.5 0 0 1 2.1 2.1l-1.5 1.5" />
+                  </svg>
+                  Rename
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onDuplicate(node.id);
+                    onCloseActionMenu();
+                  }}
+                  className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-200 transition hover:bg-white/5 hover:text-indigo-100"
+                >
+                  <svg aria-hidden="true" viewBox="0 0 20 20" className="h-4 w-4" fill="currentColor">
+                    <path d="M5 5a3 3 0 0 1 3-3h4a3 3 0 0 1 3 3v8a3 3 0 0 1-3 3H8a3 3 0 0 1-3-3V5Zm9 0a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h5a1 1 0 0 0 1-1V5Zm-9 4a1 1 0 0 0-1 1v5a3 3 0 0 0 3 3h5a1 1 0 0 0 0-2H7a1 1 0 0 1-1-1v-5a1 1 0 0 0-1-1Z" />
+                  </svg>
+                  Duplicate
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onDelete(node.id);
+                    onCloseActionMenu();
+                  }}
+                  className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-rose-200 transition hover:bg-rose-500/10 hover:text-rose-100"
+                >
+                  <svg aria-hidden="true" viewBox="0 0 20 20" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.5">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M6 6h8m-7 0-.4 8.5a1.5 1.5 0 0 0 1.5 1.5h3.8a1.5 1.5 0 0 0 1.5-1.5L13 6M8 6V4a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v2" />
+                  </svg>
+                  Delete
+                </button>
+              </div>
+            ) : null}
 
             {hasChildren ? (
               <div className="pt-1">
@@ -346,7 +924,46 @@ function PageTree({ nodes, selectedId, onSelect, onAddChild, depth = 0 }: PageTr
                   selectedId={selectedId}
                   onSelect={onSelect}
                   onAddChild={onAddChild}
+                  onToggleFavorite={onToggleFavorite}
+                  onCopyLink={onCopyLink}
+                  onDuplicate={onDuplicate}
+                  onDelete={onDelete}
+                  onStartRename={onStartRename}
+                  onRenameChange={onRenameChange}
+                  onRenameCommit={onRenameCommit}
+                  onRenameCancel={onRenameCancel}
+                  editingPageId={editingPageId}
+                  pageTitleDraft={pageTitleDraft}
+                  actionMenuId={actionMenuId}
+                  onOpenActionMenu={onOpenActionMenu}
+                  onCloseActionMenu={onCloseActionMenu}
+                  onDragStart={onDragStart}
+                  onDragEnd={onDragEnd}
+                  onDrop={onDrop}
+                  draggedPageId={draggedPageId}
                   depth={depth + 1}
+                />
+              </div>
+            ) : null}
+
+            {isEditing ? (
+              <div className="absolute left-0 top-0 z-30 w-full rounded-xl border border-indigo-300/60 bg-slate-950/95 p-2 shadow-2xl">
+                <input
+                  value={pageTitleDraft}
+                  onChange={(event) => onRenameChange(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') {
+                      event.preventDefault();
+                      onRenameCommit();
+                    } else if (event.key === 'Escape') {
+                      event.preventDefault();
+                      onRenameCancel();
+                    }
+                  }}
+                  onBlur={onRenameCommit}
+                  autoFocus
+                  className="w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-slate-100 outline-none focus:border-indigo-300/60 focus:ring-2 focus:ring-indigo-400/30"
+                  placeholder="Untitled page"
                 />
               </div>
             ) : null}
@@ -381,11 +998,72 @@ export default function Home() {
   const editorRef = useRef<HTMLDivElement | null>(null);
   const isLocalEditRef = useRef(false);
   const [editorTitle, setEditorTitle] = useState('');
+  const [pageActionMenuId, setPageActionMenuId] = useState<string | null>(null);
+  const [editingPageId, setEditingPageId] = useState<string | null>(null);
+  const [pageTitleDraft, setPageTitleDraft] = useState('');
+  const [draggedPageId, setDraggedPageId] = useState<string | null>(null);
+  const [shareMenuWorldId, setShareMenuWorldId] = useState<string | null>(null);
+  const [textSize, setTextSize] = useState('3');
+  const [textColor, setTextColor] = useState('#e2e8f0');
   const [saveStatus, setSaveStatus] = useState<'saved' | 'saving' | 'offline' | 'syncing'>('saved');
   const saveTimerRef = useRef<number | null>(null);
   const pendingSaveRef = useRef(false);
   const [isOnline, setIsOnline] = useState(true);
   const isFirstSaveRef = useRef(true);
+
+  const getCurrentUserCollaborator = useCallback(
+    (role: CollaboratorRole = 'Owner'): WorldCollaborator => {
+      const id = authUser?.uid ?? 'local-user';
+      const email = authUser?.email ?? 'storyteller@example.com';
+      const baseName = authUser?.displayName?.trim() || (email ? email.split('@')[0] : 'Storyteller');
+      const formattedName = toTitleCase(baseName || 'Storyteller');
+
+      return {
+        id,
+        name: formattedName || 'Storyteller',
+        email,
+        role,
+        avatarColor: getAvatarColor(id),
+      };
+    },
+    [authUser],
+  );
+
+  const buildActivityEntry = useCallback(
+    (action: ActivityAction, target: string, context?: string): ActivityEntry => {
+      const actor = getCurrentUserCollaborator();
+      return {
+        id: generateId('activity'),
+        action,
+        target,
+        context,
+        actorId: actor.id,
+        actorName: actor.name,
+        timestamp: new Date().toISOString(),
+      };
+    },
+    [getCurrentUserCollaborator],
+  );
+
+  const createEmptyWorld = useCallback(
+    (name: string): World => {
+      const ownerProfile = getCurrentUserCollaborator('Owner');
+      const worldId = generateId('world');
+      const createdEntry = buildActivityEntry('create', name, 'Created world');
+
+      return {
+        id: worldId,
+        name,
+        pages: [],
+        ownerId: ownerProfile.id,
+        collaborators: [ownerProfile],
+        activity: [createdEntry],
+      };
+    },
+    [buildActivityEntry, getCurrentUserCollaborator],
+  );
+
+  const currentUser = useMemo(() => getCurrentUserCollaborator(), [getCurrentUserCollaborator]);
 
   useEffect(() => {
     let isMounted = true;
@@ -495,6 +1173,15 @@ export default function Home() {
   const currentPageId = selectedPage?.id ?? null;
   const currentPageTitle = selectedPage?.title ?? '';
   const currentPageContent = selectedPage?.content ?? '';
+  const favoritePages = useMemo(
+    () => (activeWorld ? flattenPages(activeWorld.pages).filter((page) => page.favorite) : []),
+    [activeWorld],
+  );
+  const sharedWorlds = useMemo(
+    () => worlds.filter((world) => world.collaborators.length > 1),
+    [worlds],
+  );
+  const activityEntries = activeWorld?.activity ?? [];
 
   const persistWorlds = useCallback(async () => {
     if (typeof window === 'undefined') return;
@@ -638,15 +1325,16 @@ export default function Home() {
     setWorldActionMenuId(null);
     setEditingWorldId(null);
     setWorldNameDraft('');
+    setPageActionMenuId(null);
+    setEditingPageId(null);
+    setPageTitleDraft('');
+    setDraggedPageId(null);
+    setShareMenuWorldId(null);
   };
 
   const handleCreateWorld = () => {
     const count = worlds.length + 1;
-    const newWorld: World = {
-      id: generateId('world'),
-      name: `New World ${count}`,
-      pages: [],
-    };
+    const newWorld = createEmptyWorld(`New World ${count}`);
 
     setWorlds((prev) => [...prev, newWorld]);
     setActiveWorldId(newWorld.id);
@@ -662,16 +1350,29 @@ export default function Home() {
     if (!activeWorld) return;
 
     const newPage = createPage(parentId ? 'Untitled sub-page' : 'Untitled page');
+    const parentTitle = parentId ? findPageInTree(activeWorld.pages, parentId)?.title ?? '' : '';
+    const activityEntry = buildActivityEntry(
+      'create',
+      newPage.title,
+      parentTitle ? `Added beneath “${parentTitle}”` : 'Added to the index',
+    );
     setWorlds((prev) =>
       prev.map((world) =>
         world.id === activeWorld.id
-          ? { ...world, pages: addPageToTree(world.pages, parentId ?? null, newPage) }
+          ? {
+              ...world,
+              pages: addPageToTree(world.pages, parentId ?? null, newPage),
+              activity: appendActivity(world.activity, activityEntry),
+            }
           : world,
       ),
     );
 
     setSelectedPageId(newPage.id);
     setView('page');
+    setPageActionMenuId(null);
+    setEditingPageId(newPage.id);
+    setPageTitleDraft(newPage.title);
   };
 
   const startWorldRename = (world: World) => {
@@ -700,10 +1401,14 @@ export default function Home() {
     if (!source) return;
 
     const copyName = `${source.name} copy`;
+    const duplicateBase = createEmptyWorld(copyName);
     const duplicate: World = {
-      id: generateId('world'),
-      name: copyName,
+      ...duplicateBase,
       pages: clonePageTree(source.pages),
+      activity: appendActivity(
+        duplicateBase.activity,
+        buildActivityEntry('duplicate', source.name, `Copied from “${source.name}”`),
+      ),
     };
 
     setWorlds((prev) => [...prev, duplicate]);
@@ -729,7 +1434,7 @@ export default function Home() {
       const remaining = prev.filter((world) => world.id !== worldId);
 
       if (remaining.length === 0) {
-        const fallbackWorld: World = { id: generateId('world'), name: 'Untitled world', pages: [] };
+        const fallbackWorld = createEmptyWorld('Untitled world');
         setActiveWorldId(fallbackWorld.id);
         setSelectedPageId(null);
         setView('dashboard');
@@ -753,6 +1458,267 @@ export default function Home() {
     setIsWorldMenuOpen(false);
     setEditingWorldId(null);
     setWorldNameDraft('');
+    setShareMenuWorldId(null);
+  };
+
+  const handleOpenPageMenu = (pageId: string) => {
+    setPageActionMenuId(pageId);
+    setEditingPageId(null);
+    setPageTitleDraft('');
+  };
+
+  const handleClosePageMenu = () => {
+    setPageActionMenuId(null);
+  };
+
+  const handleStartPageRename = (pageId: string) => {
+    if (!activeWorld) return;
+
+    const page = findPageInTree(activeWorld.pages, pageId);
+    if (!page) return;
+
+    setEditingPageId(pageId);
+    setPageTitleDraft(page.title);
+    setPageActionMenuId(null);
+  };
+
+  const handleCommitPageRename = () => {
+    if (!activeWorld || !editingPageId) return;
+
+    const nextTitle = pageTitleDraft.trim() || 'Untitled page';
+    const existingPage = findPageInTree(activeWorld.pages, editingPageId);
+    const previousTitle = existingPage?.title ?? 'Untitled page';
+    const shouldLog = previousTitle !== nextTitle;
+    const renameEntry = shouldLog
+      ? buildActivityEntry('update', nextTitle, `Renamed from “${previousTitle}”`)
+      : null;
+
+    setWorlds((prev) =>
+      prev.map((world) =>
+        world.id === activeWorld.id
+          ? {
+              ...world,
+              pages: updatePageInTree(world.pages, editingPageId, (page) => ({
+                ...page,
+                title: nextTitle,
+              })),
+              activity: renameEntry ? appendActivity(world.activity, renameEntry) : world.activity,
+            }
+          : world,
+      ),
+    );
+
+    if (editingPageId === currentPageId) {
+      setEditorTitle(nextTitle);
+    }
+
+    setEditingPageId(null);
+    setPageTitleDraft('');
+  };
+
+  const handleCancelPageRename = () => {
+    setEditingPageId(null);
+    setPageTitleDraft('');
+  };
+
+  const handlePageRenameChange = (value: string) => {
+    setPageTitleDraft(value);
+  };
+
+  const handleRemoveCollaborator = (worldId: string, collaboratorId: string) => {
+    setWorlds((prev) =>
+      prev.map((world) => {
+        if (world.id !== worldId) {
+          return world;
+        }
+
+        if (collaboratorId === world.ownerId || world.ownerId !== currentUser.id) {
+          return world;
+        }
+
+        const collaborator = world.collaborators.find((member) => member.id === collaboratorId);
+        if (!collaborator) {
+          return world;
+        }
+
+        const removalEntry = buildActivityEntry('share', collaborator.name, 'Removed from shared access');
+
+        return {
+          ...world,
+          collaborators: world.collaborators.filter((member) => member.id !== collaboratorId),
+          activity: appendActivity(world.activity, removalEntry),
+        };
+      }),
+    );
+  };
+
+  const handleToggleFavorite = (pageId: string) => {
+    if (!activeWorld) return;
+
+    setWorlds((prev) =>
+      prev.map((world) =>
+        world.id === activeWorld.id
+          ? {
+              ...world,
+              pages: updatePageInTree(world.pages, pageId, (page) => ({
+                ...page,
+                favorite: !page.favorite,
+              })),
+            }
+          : world,
+      ),
+    );
+  };
+
+  const handleCopyPageLink = (pageId: string) => {
+    if (typeof window === 'undefined') return;
+
+    const url = new URL(window.location.href);
+    url.searchParams.set('world', activeWorldId);
+    url.searchParams.set('page', pageId);
+
+    if (typeof navigator !== 'undefined' && navigator.clipboard && 'writeText' in navigator.clipboard) {
+      navigator.clipboard.writeText(url.toString()).catch(() => {
+        window.prompt('Copy this link to share the page:', url.toString());
+      });
+    } else {
+      window.prompt('Copy this link to share the page:', url.toString());
+    }
+  };
+
+  const handleDuplicatePage = (pageId: string) => {
+    if (!activeWorld) return;
+
+    const sourcePage = findPageInTree(activeWorld.pages, pageId);
+    if (!sourcePage) return;
+
+    const duplicateTitle = `${sourcePage.title} copy`;
+    const duplicatePage: PageNode = {
+      id: generateId('page'),
+      title: duplicateTitle,
+      content: sourcePage.content,
+      favorite: false,
+      children: clonePageTree(sourcePage.children),
+    };
+    const duplicateEntry = buildActivityEntry('duplicate', duplicateTitle, `Copied from “${sourcePage.title}”`);
+
+    setWorlds((prev) =>
+      prev.map((world) => {
+        if (world.id !== activeWorld.id) {
+          return world;
+        }
+
+        const insertion = insertPageAfter(world.pages, pageId, duplicatePage);
+        return {
+          ...world,
+          pages: insertion.inserted ? insertion.nodes : [...world.pages, duplicatePage],
+          activity: appendActivity(world.activity, duplicateEntry),
+        };
+      }),
+    );
+
+    setSelectedPageId(duplicatePage.id);
+    setView('page');
+    setEditorTitle(duplicateTitle);
+    setPageActionMenuId(null);
+    setEditingPageId(null);
+    setPageTitleDraft('');
+  };
+
+  const handleDeletePage = (pageId: string) => {
+    if (!activeWorld) return;
+
+    if (typeof window !== 'undefined') {
+      const confirmed = window.confirm('Delete this page and its sub-pages?');
+      if (!confirmed) {
+        return;
+      }
+    }
+
+    const removal = removePageFromTree(activeWorld.pages, pageId);
+    if (!removal.removed) {
+      return;
+    }
+    const removedPage = removal.removed;
+    const deleteEntry = buildActivityEntry(
+      'delete',
+      removedPage.title,
+      removedPage.children.length
+        ? 'Removed the page and its nested entries'
+        : 'Removed the page from the index',
+    );
+
+    setWorlds((prev) =>
+      prev.map((world) =>
+        world.id === activeWorld.id
+          ? {
+              ...world,
+              pages: removal.nodes,
+              activity: appendActivity(world.activity, deleteEntry),
+            }
+          : world,
+      ),
+    );
+
+    if (selectedPageId === pageId) {
+      setSelectedPageId(null);
+      setView('dashboard');
+      setEditorTitle('');
+    }
+
+    setPageActionMenuId(null);
+    setEditingPageId(null);
+    setPageTitleDraft('');
+  };
+
+  const handlePageDragStart = (pageId: string, event: DragEvent<HTMLDivElement>) => {
+    setDraggedPageId(pageId);
+    setPageActionMenuId(null);
+    setEditingPageId(null);
+    setPageTitleDraft('');
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('text/plain', pageId);
+  };
+
+  const handlePageDragEnd = () => {
+    setDraggedPageId(null);
+  };
+
+  const handlePageDrop = (targetId: string) => {
+    if (!activeWorld || !draggedPageId) return;
+
+    if (draggedPageId === targetId) {
+      setDraggedPageId(null);
+      return;
+    }
+    if (isDescendant(activeWorld.pages, draggedPageId, targetId)) {
+      setDraggedPageId(null);
+      return;
+    }
+
+    const draggedPage = findPageInTree(activeWorld.pages, draggedPageId);
+    const targetPage = findPageInTree(activeWorld.pages, targetId);
+    const moveEntry = draggedPage
+      ? buildActivityEntry(
+          'move',
+          draggedPage.title,
+          targetPage ? `Repositioned before “${targetPage.title}”` : 'Reordered in the index',
+        )
+      : null;
+
+    setWorlds((prev) =>
+      prev.map((world) =>
+        world.id === activeWorld.id
+          ? {
+              ...world,
+              pages: movePageBefore(world.pages, draggedPageId, targetId),
+              activity: moveEntry ? appendActivity(world.activity, moveEntry) : world.activity,
+            }
+          : world,
+      ),
+    );
+
+    setDraggedPageId(null);
   };
 
   const handleUpdatePageTitle = (pageId: string, title: string) => {
@@ -847,11 +1813,18 @@ export default function Home() {
   const handleSelectPage = (pageId: string) => {
     setSelectedPageId(pageId);
     setView('page');
+    setPageActionMenuId(null);
+    setEditingPageId(null);
+    setPageTitleDraft('');
   };
 
   const handleShowDashboard = () => {
     setSelectedPageId(null);
     setView('dashboard');
+    setPageActionMenuId(null);
+    setEditingPageId(null);
+    setPageTitleDraft('');
+    setShareMenuWorldId(null);
   };
 
   const renderDashboard = () => (
@@ -883,6 +1856,42 @@ export default function Home() {
 
         <div className="flex flex-col gap-4">
           <div className="rounded-3xl border border-white/10 bg-slate-900/70 p-6">
+            <div className="flex items-center justify-between">
+              <p className="text-xs uppercase tracking-[0.34em] text-indigo-200">Favorites</p>
+              <span className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[11px] uppercase tracking-[0.3em] text-indigo-100">
+                {favoritePages.length}
+              </span>
+            </div>
+
+            {favoritePages.length > 0 ? (
+              <ul className="mt-4 space-y-3 text-sm text-slate-200">
+                {favoritePages.map((page) => (
+                  <li
+                    key={page.id}
+                    className="flex items-center justify-between rounded-2xl border border-white/10 bg-white/5 px-4 py-2.5 transition hover:border-indigo-300/40 hover:bg-white/10"
+                  >
+                    <button
+                      type="button"
+                      onClick={() => handleSelectPage(page.id)}
+                      className="flex-1 truncate text-left hover:text-indigo-100"
+                    >
+                      {page.title}
+                    </button>
+                    <span className="ml-3 inline-flex items-center gap-1 text-[11px] uppercase tracking-[0.3em] text-indigo-200">
+                      Open
+                      <svg aria-hidden="true" viewBox="0 0 20 20" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.5">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="m8 6 4 4-4 4" />
+                      </svg>
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="mt-4 text-sm text-slate-400">Mark pages as favorites to see them here.</p>
+            )}
+          </div>
+
+          <div className="rounded-3xl border border-white/10 bg-slate-900/70 p-6">
             <p className="text-xs uppercase tracking-[0.32em] text-indigo-200">Today’s cadence</p>
             <ul className="mt-4 space-y-4">
               {timeline.map((item) => (
@@ -908,6 +1917,163 @@ export default function Home() {
               Schedule export
             </button>
           </div>
+        </div>
+      </section>
+
+      <section className="grid gap-6 lg:grid-cols-[1.1fr_0.9fr]">
+        <div className="rounded-3xl border border-white/10 bg-slate-900/70 p-6">
+          <div className="flex items-center justify-between">
+            <p className="text-xs uppercase tracking-[0.34em] text-indigo-200/80">Shared worlds</p>
+            <span className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[11px] uppercase tracking-[0.3em] text-indigo-100">
+              {sharedWorlds.length}
+            </span>
+          </div>
+
+          {sharedWorlds.length ? (
+            <ul className="mt-4 space-y-3">
+              {sharedWorlds.map((world) => {
+                const owner =
+                  world.collaborators.find((member) => member.id === world.ownerId) ?? world.collaborators[0];
+                const collaboratorCount = world.collaborators.length;
+                const isExpanded = shareMenuWorldId === world.id;
+                const canManage = currentUser.id === world.ownerId;
+
+                return (
+                  <li
+                    key={world.id}
+                    className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 transition hover:border-indigo-300/40 hover:bg-white/10"
+                  >
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-semibold text-slate-100">{world.name}</p>
+                        <p className="mt-1 text-xs text-slate-400">
+                          {collaboratorCount} {collaboratorCount === 1 ? 'member' : 'members'} • Owner: {owner?.name ?? 'Unknown'}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setShareMenuWorldId((previous) => (previous === world.id ? null : world.id))
+                        }
+                        className="inline-flex h-9 items-center gap-2 rounded-xl border border-white/10 bg-slate-950/70 px-3 text-[11px] font-semibold uppercase tracking-[0.3em] text-indigo-100 transition hover:border-indigo-300/60"
+                        aria-expanded={isExpanded}
+                        aria-controls={`shared-world-${world.id}`}
+                      >
+                        {isExpanded ? 'Hide' : 'View'}
+                        <svg
+                          aria-hidden="true"
+                          viewBox="0 0 20 20"
+                          className={`h-4 w-4 transition ${isExpanded ? 'rotate-180' : ''}`}
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="1.5"
+                        >
+                          <path strokeLinecap="round" strokeLinejoin="round" d="m6 8 4 4 4-4" />
+                        </svg>
+                      </button>
+                    </div>
+
+                    {isExpanded ? (
+                      <ul id={`shared-world-${world.id}`} className="mt-4 space-y-2">
+                        {world.collaborators.map((member) => {
+                          const isOwner = member.id === world.ownerId;
+                          const canRemove = canManage && !isOwner;
+                          const initial = member.name?.[0]?.toUpperCase() ?? '?';
+
+                          return (
+                            <li
+                              key={member.id}
+                              className="flex items-center justify-between gap-3 rounded-xl border border-white/10 bg-slate-900/80 px-3 py-2 text-sm text-slate-200"
+                            >
+                              <div className="flex items-center gap-3">
+                                <span
+                                  className="flex h-8 w-8 items-center justify-center rounded-full text-xs font-semibold text-slate-950"
+                                  style={{ backgroundColor: member.avatarColor }}
+                                  aria-hidden="true"
+                                >
+                                  {initial}
+                                </span>
+                                <div className="min-w-0">
+                                  <p className="truncate font-medium text-slate-100">{member.name}</p>
+                                  <p className="truncate text-xs text-slate-400">{member.email}</p>
+                                </div>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <span
+                                  className={`rounded-full border px-2 py-0.5 text-[11px] uppercase tracking-[0.3em] ${
+                                    isOwner
+                                      ? 'border-amber-300/50 text-amber-200'
+                                      : 'border-white/10 text-indigo-100'
+                                  }`}
+                                >
+                                  {member.role}
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() => handleRemoveCollaborator(world.id, member.id)}
+                                  disabled={!canRemove}
+                                  className={`inline-flex h-8 items-center rounded-lg border px-2 text-xs font-semibold uppercase tracking-[0.28em] transition ${
+                                    canRemove
+                                      ? 'border-white/10 text-rose-200 hover:border-rose-300/60 hover:text-rose-100'
+                                      : 'cursor-not-allowed border-white/5 text-slate-500'
+                                  }`}
+                                >
+                                  Remove
+                                </button>
+                              </div>
+                            </li>
+                          );
+                        })}
+                        {!canManage ? (
+                          <li className="rounded-xl border border-dashed border-white/10 bg-white/5 px-3 py-2 text-xs text-slate-400">
+                            Only the world owner can manage access.
+                          </li>
+                        ) : null}
+                      </ul>
+                    ) : null}
+                  </li>
+                );
+              })}
+            </ul>
+          ) : (
+            <p className="mt-4 text-sm text-slate-400">
+              Invite collaborators to share your worlds and manage access in one place.
+            </p>
+          )}
+        </div>
+
+        <div className="rounded-3xl border border-white/10 bg-slate-900/70 p-6">
+          <div className="flex items-center justify-between">
+            <p className="text-xs uppercase tracking-[0.34em] text-indigo-200/80">World activity</p>
+            <span className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[11px] uppercase tracking-[0.3em] text-indigo-100">
+              {activityEntries.length}
+            </span>
+          </div>
+
+          {activityEntries.length ? (
+            <ul className="mt-4 space-y-3">
+              {activityEntries.slice(0, 6).map((entry) => (
+                <li key={entry.id} className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="text-sm font-semibold text-slate-100">{entry.actorName}</p>
+                      <p className="mt-1 text-sm text-slate-300">{summarizeActivity(entry)}</p>
+                      {entry.context ? (
+                        <p className="mt-1 text-xs text-slate-400">{entry.context}</p>
+                      ) : null}
+                    </div>
+                    <span className="shrink-0 text-xs uppercase tracking-[0.28em] text-indigo-200/80">
+                      {formatRelativeTime(entry.timestamp)}
+                    </span>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="mt-4 text-sm text-slate-400">
+              Activity will appear once you start editing pages in this world.
+            </p>
+          )}
         </div>
       </section>
 
@@ -1061,55 +2227,115 @@ export default function Home() {
       },
     ];
 
-    return (
-      <div className="flex flex-col gap-8">
-        <div className="rounded-3xl border border-white/10 bg-gradient-to-br from-white/10 via-white/5 to-transparent p-8">
-          <input
-            className="w-full bg-transparent text-3xl font-semibold text-slate-50 outline-none placeholder:text-slate-500"
-            value={editorTitle}
-            onChange={(event) => {
-              setEditorTitle(event.target.value);
-              handleUpdatePageTitle(currentPageId, event.target.value);
-            }}
-            placeholder="Untitled page"
-          />
-          <p className="mt-2 text-sm text-slate-400">
-            Draft lore, collect reference notes, and stitch together the threads of your universe.
-          </p>
-        </div>
+    const sizeOptions = [
+      { label: 'Small', value: '2' },
+      { label: 'Normal', value: '3' },
+      { label: 'Large', value: '4' },
+      { label: 'Huge', value: '5' },
+    ];
 
-        <div className="flex flex-col gap-5 rounded-3xl border border-white/10 bg-slate-950/60 p-8">
-          <div className="flex flex-wrap items-center gap-2">
-                {toolbarButtons.map((button) => (
-                  <button
-                    key={button.label}
-                    type="button"
-                    onClick={() => handleToolbarAction(button.command, button.value)}
-                className="inline-flex h-9 items-center justify-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 text-xs font-semibold uppercase tracking-[0.28em] text-slate-200 transition hover:-translate-y-0.5 hover:border-indigo-300/60 hover:text-indigo-100"
-                aria-label={button.label}
-              >
-                {button.icon}
-              </button>
-            ))}
+    const colorOptions = [
+      { label: 'Snow', value: '#e2e8f0' },
+      { label: 'Celestial', value: '#38bdf8' },
+      { label: 'Petal', value: '#f472b6' },
+      { label: 'Aurora', value: '#a855f7' },
+      { label: 'Ember', value: '#f97316' },
+      { label: 'Verdant', value: '#34d399' },
+    ];
+
+    const handleTextSizeSelect = (value: string) => {
+      setTextSize(value);
+      handleToolbarAction('fontSize', value);
+    };
+
+    const handleTextColorSelect = (color: string) => {
+      setTextColor(color);
+      handleToolbarAction('foreColor', color);
+    };
+
+    return (
+      <div className="flex flex-col gap-6">
+        <div className="overflow-hidden rounded-3xl border border-white/10 bg-slate-950/70 shadow-inner">
+          <div className="bg-gradient-to-br from-white/10 via-white/5 to-transparent px-6 py-6">
+            <input
+              className="w-full bg-transparent text-3xl font-semibold text-slate-50 outline-none placeholder:text-slate-500"
+              value={editorTitle}
+              onChange={(event) => {
+                setEditorTitle(event.target.value);
+                handleUpdatePageTitle(currentPageId, event.target.value);
+              }}
+              placeholder="Untitled page"
+            />
           </div>
 
-          <div
-            ref={editorRef}
-            className="min-h-[420px] rounded-2xl border border-white/10 bg-slate-950/80 px-5 py-4 text-base leading-relaxed text-slate-200 outline-none transition focus-within:border-indigo-400/50 focus-within:ring-2 focus-within:ring-indigo-400/30"
-            contentEditable
-            suppressContentEditableWarning
-            onInput={handleEditorInput}
-            onBlur={handleEditorInput}
-            data-placeholder="Begin weaving the story of this page..."
-            role="textbox"
-            aria-multiline="true"
-          />
+          <div className="border-t border-white/10 bg-slate-950/85 px-6 py-5">
+            <div className="flex flex-wrap items-center gap-2 sm:gap-3">
+              {toolbarButtons.map((button) => (
+                <button
+                  key={button.label}
+                  type="button"
+                  onClick={() => handleToolbarAction(button.command, button.value)}
+                  className="inline-flex h-9 items-center justify-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 text-xs font-semibold uppercase tracking-[0.28em] text-slate-200 transition hover:-translate-y-0.5 hover:border-indigo-300/60 hover:text-indigo-100"
+                  aria-label={button.label}
+                >
+                  {button.icon}
+                </button>
+              ))}
 
-          <div className="flex flex-wrap items-center justify-between gap-3 text-xs uppercase tracking-[0.28em] text-slate-400">
-            <span>Rich text · Live autosave</span>
-            <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] font-semibold text-indigo-100">
-              {syncStatusLabel}
-            </span>
+              <label className="inline-flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-1.5 text-[11px] uppercase tracking-[0.3em] text-slate-300">
+                Size
+                <select
+                  value={textSize}
+                  onChange={(event) => handleTextSizeSelect(event.target.value)}
+                  className="rounded-lg border border-white/10 bg-slate-900/70 px-2 py-1 text-xs font-semibold uppercase tracking-[0.28em] text-slate-100 outline-none focus:border-indigo-300/60"
+                >
+                  {sizeOptions.map((option) => (
+                    <option key={option.value} value={option.value} className="text-slate-900">
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <div className="flex items-center gap-1 rounded-xl border border-white/10 bg-white/5 px-3 py-1.5">
+                <span className="text-[11px] uppercase tracking-[0.3em] text-slate-300">Color</span>
+                <div className="flex items-center gap-1.5">
+                  {colorOptions.map((option) => (
+                    <button
+                      key={option.value}
+                      type="button"
+                      onClick={() => handleTextColorSelect(option.value)}
+                      className={`h-6 w-6 rounded-full border-2 transition ${
+                        textColor === option.value
+                          ? 'border-white ring-2 ring-indigo-300/60'
+                          : 'border-white/20 hover:border-white/60'
+                      }`}
+                      style={{ backgroundColor: option.value }}
+                      aria-label={`Set text color to ${option.label}`}
+                    />
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <div
+              ref={editorRef}
+              className="mt-5 min-h-[420px] rounded-2xl border border-white/10 bg-slate-950/80 px-5 py-4 text-base leading-relaxed text-slate-200 outline-none transition focus-within:border-indigo-400/50 focus-within:ring-2 focus-within:ring-indigo-400/30"
+              contentEditable
+              suppressContentEditableWarning
+              onInput={handleEditorInput}
+              onBlur={handleEditorInput}
+              data-placeholder="Begin weaving the story of this page..."
+              role="textbox"
+              aria-multiline="true"
+            />
+
+            <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-xs uppercase tracking-[0.28em] text-slate-400">
+              <span>Rich text · Live autosave</span>
+              <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] font-semibold text-indigo-100">
+                {syncStatusLabel}
+              </span>
+            </div>
           </div>
         </div>
       </div>
@@ -1385,7 +2611,10 @@ export default function Home() {
             </div>
 
             <div className="flex items-center gap-3">
-              <div className="hidden sm:flex items-center">
+              <div className="flex min-w-0 items-center gap-3">
+                <span className="hidden pr-4 text-xs uppercase tracking-[0.32em] text-slate-400 sm:block">
+                  Current world
+                </span>
                 {editingWorldId === activeWorld?.id ? (
                   <input
                     ref={editingWorldId === activeWorld?.id ? worldNameInputRef : null}
@@ -1393,14 +2622,14 @@ export default function Home() {
                     onChange={handleWorldNameInput}
                     onKeyDown={handleWorldNameKeyDown}
                     onBlur={commitWorldRename}
-                    className="w-full max-w-xs rounded-xl border border-white/10 bg-white/5 px-3 py-1.5 text-sm font-medium text-slate-100 outline-none focus:border-indigo-400/60 focus:ring-2 focus:ring-indigo-400/30"
+                    className="w-full max-w-sm rounded-2xl border border-white/15 bg-white/10 px-4 py-2 text-lg font-semibold text-slate-50 outline-none focus:border-indigo-300/60 focus:ring-2 focus:ring-indigo-400/30"
                     placeholder="Untitled world"
                   />
                 ) : (
                   <button
                     type="button"
                     onClick={() => activeWorld && startWorldRename(activeWorld)}
-                    className="rounded-xl px-2 py-1 text-sm font-medium text-slate-300 transition hover:bg-white/5 hover:text-slate-100"
+                    className="max-w-sm truncate rounded-2xl bg-white/5 px-4 py-2 text-left text-lg font-semibold text-slate-100 transition hover:-translate-y-0.5 hover:bg-white/10 hover:text-white"
                   >
                     {activeWorld?.name ?? 'No world selected'}
                   </button>
@@ -1451,6 +2680,34 @@ export default function Home() {
                                   : 'text-slate-300 hover:border-white/10 hover:bg-white/5 hover:text-slate-100'
                               }`}
                             >
+                              <div className="flex min-w-0 flex-1 items-center">
+                                {isEditing ? (
+                                  <input
+                                    ref={isEditing ? worldNameInputRef : null}
+                                    value={worldNameDraft}
+                                    onChange={handleWorldNameInput}
+                                    onKeyDown={handleWorldNameKeyDown}
+                                    onBlur={commitWorldRename}
+                                    className="w-full rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-sm text-slate-100 outline-none focus:border-indigo-400/60 focus:ring-2 focus:ring-indigo-400/30"
+                                    placeholder="Untitled world"
+                                  />
+                                ) : (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleSelectWorld(world.id)}
+                                    className="flex-1 truncate text-left"
+                                  >
+                                    {world.name}
+                                  </button>
+                                )}
+                              </div>
+
+                              {isSelected ? (
+                                <svg aria-hidden="true" viewBox="0 0 20 20" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.5">
+                                  <path strokeLinecap="round" strokeLinejoin="round" d="m5.5 10 3 3 6-6" />
+                                </svg>
+                              ) : null}
+
                               <button
                                 type="button"
                                 onClick={() =>
@@ -1465,32 +2722,6 @@ export default function Home() {
                                   <path d="M4 10a1.5 1.5 0 1 1 3 0 1.5 1.5 0 0 1-3 0Zm4.5 0a1.5 1.5 0 1 1 3 0 1.5 1.5 0 0 1-3 0Zm4.5 0a1.5 1.5 0 1 1 3 0 1.5 1.5 0 0 1-3 0Z" />
                                 </svg>
                               </button>
-
-                              {isEditing ? (
-                                <input
-                                  ref={isEditing ? worldNameInputRef : null}
-                                  value={worldNameDraft}
-                                  onChange={handleWorldNameInput}
-                                  onKeyDown={handleWorldNameKeyDown}
-                                  onBlur={commitWorldRename}
-                                  className="flex-1 rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-sm text-slate-100 outline-none focus:border-indigo-400/60 focus:ring-2 focus:ring-indigo-400/30"
-                                  placeholder="Untitled world"
-                                />
-                              ) : (
-                                <button
-                                  type="button"
-                                  onClick={() => handleSelectWorld(world.id)}
-                                  className="flex-1 truncate text-left"
-                                >
-                                  {world.name}
-                                </button>
-                              )}
-
-                              {isSelected ? (
-                                <svg aria-hidden="true" viewBox="0 0 20 20" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.5">
-                                  <path strokeLinecap="round" strokeLinejoin="round" d="m5.5 10 3 3 6-6" />
-                                </svg>
-                              ) : null}
                             </div>
 
                             {worldActionMenuId === world.id ? (
@@ -1586,13 +2817,6 @@ export default function Home() {
               )}
               <span>{syncStatusLabel}</span>
             </button>
-            <button className="inline-flex h-10 w-10 items-center justify-center rounded-2xl border border-white/10 bg-white/10 text-slate-200 transition hover:-translate-y-0.5 hover:border-indigo-400/40 hover:text-indigo-200">
-              <span className="sr-only">Open notifications</span>
-              <svg aria-hidden="true" viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.5">
-                <path strokeLinecap="round" strokeLinejoin="round" d="M15 17h5l-1.4-1.4A2 2 0 0 1 18 14.2V11a6 6 0 1 0-12 0v3.2c0 .5-.2 1-.6 1.4L4 17h5" />
-                <path strokeLinecap="round" strokeLinejoin="round" d="M9 17c0 1.1.9 2 2 2h2a2 2 0 0 0 2-2" />
-              </svg>
-            </button>
             <button
               type="button"
               onClick={handleSignOut}
@@ -1675,6 +2899,23 @@ export default function Home() {
                     selectedId={selectedPageId}
                     onSelect={handleSelectPage}
                     onAddChild={handleAddPage}
+                    onToggleFavorite={handleToggleFavorite}
+                    onCopyLink={handleCopyPageLink}
+                    onDuplicate={handleDuplicatePage}
+                    onDelete={handleDeletePage}
+                    onStartRename={handleStartPageRename}
+                    onRenameChange={handlePageRenameChange}
+                    onRenameCommit={handleCommitPageRename}
+                    onRenameCancel={handleCancelPageRename}
+                    editingPageId={editingPageId}
+                    pageTitleDraft={pageTitleDraft}
+                    actionMenuId={pageActionMenuId}
+                    onOpenActionMenu={handleOpenPageMenu}
+                    onCloseActionMenu={handleClosePageMenu}
+                    onDragStart={handlePageDragStart}
+                    onDragEnd={handlePageDragEnd}
+                    onDrop={handlePageDrop}
+                    draggedPageId={draggedPageId}
                   />
                 ) : (
                   <div className="rounded-xl border border-dashed border-white/10 px-3 py-6 text-center text-sm text-slate-400">
