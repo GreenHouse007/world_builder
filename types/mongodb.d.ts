@@ -19,10 +19,11 @@ declare module 'mongodb' {
     findOneAndUpdate(
       filter: Filter,
       update: UpdateFilter,
-      options?: { returnDocument?: 'before' | 'after' }
+      options?: { returnDocument?: 'before' | 'after'; upsert?: boolean }
     ): Promise<{ value: TSchema | null }>;
     insertOne(doc: TSchema): Promise<{ insertedId: ObjectId }>;
     updateOne(filter: Filter, update: UpdateFilter): Promise<unknown>;
+    deleteOne(filter: Filter): Promise<{ deletedCount?: number }>;
     deleteMany(filter: Filter): Promise<{ deletedCount?: number }>;
     createIndex(indexSpec: Record<string, 1 | -1>): Promise<string>;
   }

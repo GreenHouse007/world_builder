@@ -2,9 +2,10 @@ import { NextRequest, NextResponse } from 'next/server';
 import type { World } from '@/lib/models/world';
 import { getUserIdFromRequest } from '@/lib/server/userContext';
 import { createWorldForUser, getWorldsForUser } from '@/lib/server/worldService';
+import { isDate } from '@/lib/utils/isDate';
 
 function normalizeDateLike(value: unknown) {
-  if (value instanceof Date) {
+  if (isDate(value)) {
     return value.toISOString();
   }
 
