@@ -7,8 +7,14 @@ import { getDocument, removeDocument, updateDocumentContent } from '@/lib/server
 function serializeDocument(document: DocumentNode) {
   return {
     ...document,
-    createdAt: document.createdAt instanceof Date ? document.createdAt.toISOString() : document.createdAt,
-    updatedAt: document.updatedAt instanceof Date ? document.updatedAt.toISOString() : document.updatedAt,
+    createdAt:
+      document.createdAt && document.createdAt instanceof Date
+        ? document.createdAt.toISOString()
+        : document.createdAt,
+    updatedAt:
+      document.updatedAt && document.updatedAt instanceof Date
+        ? document.updatedAt.toISOString()
+        : document.updatedAt,
   };
 }
 

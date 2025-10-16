@@ -6,8 +6,14 @@ import { createWorldForUser, getWorldsForUser } from '@/lib/server/worldService'
 function serializeWorld(world: World) {
   return {
     ...world,
-    createdAt: world.createdAt instanceof Date ? world.createdAt.toISOString() : world.createdAt,
-    updatedAt: world.updatedAt instanceof Date ? world.updatedAt.toISOString() : world.updatedAt,
+    createdAt:
+      world.createdAt && world.createdAt instanceof Date
+        ? world.createdAt.toISOString()
+        : world.createdAt,
+    updatedAt:
+      world.updatedAt && world.updatedAt instanceof Date
+        ? world.updatedAt.toISOString()
+        : world.updatedAt,
   };
 }
 
