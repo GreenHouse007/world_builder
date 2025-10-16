@@ -1836,9 +1836,13 @@ export default function Home() {
           : world,
       ),
     );
+    const activityChanges: WorldChange[] = moveEntry
+      ? [{ type: 'appendActivity', worldId: activeWorld.id, entries: [moveEntry] }]
+      : [];
+
     queueChanges([
       { type: 'movePage', worldId: activeWorld.id, pageId: draggedPageId, targetId, position: 'before' },
-      ...(moveEntry ? [{ type: 'appendActivity', worldId: activeWorld.id, entries: [moveEntry] }] : []),
+      ...activityChanges,
     ]);
 
     setDraggedPageId(null);
