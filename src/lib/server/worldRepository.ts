@@ -31,13 +31,20 @@ const mapWorld = (document: StoredWorld): World => ({
   activity: Array.isArray(document.activity)
     ? document.activity.map((entry) => ({
         ...entry,
-        timestamp: entry.timestamp instanceof Date ? entry.timestamp.toISOString() : `${entry.timestamp}`,
+        timestamp:
+          entry.timestamp && entry.timestamp instanceof Date
+            ? entry.timestamp.toISOString()
+            : `${entry.timestamp}`,
       }))
     : [],
   createdAt:
-    document.createdAt instanceof Date ? document.createdAt.toISOString() : new Date(document.createdAt).toISOString(),
+    document.createdAt && document.createdAt instanceof Date
+      ? document.createdAt.toISOString()
+      : new Date(document.createdAt).toISOString(),
   updatedAt:
-    document.updatedAt instanceof Date ? document.updatedAt.toISOString() : new Date(document.updatedAt).toISOString(),
+    document.updatedAt && document.updatedAt instanceof Date
+      ? document.updatedAt.toISOString()
+      : new Date(document.updatedAt).toISOString(),
 });
 
 const normalizeActivityForStorage = (activity: ActivityEntry[]): StoredActivity[] => {
