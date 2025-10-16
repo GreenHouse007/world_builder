@@ -164,14 +164,6 @@ const formatRelativeTime = (isoTimestamp: string) => {
   return `${years}y ago`;
 };
 
-const generateId = (prefix: string) => {
-  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
-    return `${prefix}-${crypto.randomUUID()}`;
-  }
-
-  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-};
-
 const ensureHtmlContent = (content: string) => {
   if (!content || !content.trim()) {
     return '';
@@ -193,6 +185,203 @@ const ensureHtmlContent = (content: string) => {
 };
 
 const sanitizeEditorHtml = (html: string) => html.replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, '');
+
+const convertHtmlToPlainText = (html: string) => {
+  if (!html) {
+    return '';
+  }
+
+  const normalizedHtml = html.replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, '');
+
+  if (typeof window === 'undefined') {
+    return normalizedHtml
+      .replace(/<br\s*\/?>(?=\s*)/gi, '\n')
+      .replace(/<\/(p|div|section|article|h[1-6]|blockquote)>/gi, '\n\n')
+      .replace(/<li[^>]*>/gi, '\n• ')
+      .replace(/<\/(li|ul|ol)>/gi, '\n')
+      .replace(/<[^>]+>/g, '')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+  }
+
+  const container = window.document.createElement('div');
+  container.innerHTML = normalizedHtml;
+
+  const lines: string[] = [];
+
+  const appendTextLine = (text: string | null | undefined) => {
+    const trimmed = text?.replace(/\s+/g, ' ').trim();
+    if (!trimmed) {
+      return;
+    }
+    lines.push(trimmed);
+  };
+
+  const appendBlankLine = () => {
+    if (!lines.length || lines[lines.length - 1] === '') {
+      return;
+    }
+    lines.push('');
+  };
+
+  const traverse = (node: Node) => {
+    if (node.nodeType !== Node.ELEMENT_NODE) {
+      if (node.nodeType === Node.TEXT_NODE) {
+        const parent = node.parentElement;
+        if (!parent || parent.childNodes.length === 1) {
+          appendTextLine(node.textContent);
+        }
+      }
+      return;
+    }
+
+    const element = node as HTMLElement;
+    const tag = element.tagName.toLowerCase();
+
+    if (tag === 'br') {
+      appendBlankLine();
+      return;
+    }
+
+    if (tag === 'ul' || tag === 'ol') {
+      const items = Array.from(element.children).filter(
+        (child): child is HTMLElement => child.tagName.toLowerCase() === 'li',
+      );
+
+      items.forEach((item, index) => {
+        const text = item.textContent?.replace(/\s+/g, ' ').trim();
+        if (!text) {
+          return;
+        }
+
+        if (tag === 'ol') {
+          appendTextLine(`${index + 1}. ${text}`);
+        } else {
+          appendTextLine(`• ${text}`);
+        }
+      });
+
+      appendBlankLine();
+      return;
+    }
+
+    if (tag === 'li') {
+      const parent = element.parentElement;
+      const text = element.textContent?.replace(/\s+/g, ' ').trim();
+      if (!text) {
+        return;
+      }
+
+      if (parent?.tagName.toLowerCase() === 'ol') {
+        const index = Array.from(parent.children).indexOf(element) + 1;
+        appendTextLine(`${index}. ${text}`);
+      } else {
+        appendTextLine(`• ${text}`);
+      }
+
+      appendBlankLine();
+      return;
+    }
+
+    if (
+      ['p', 'div', 'section', 'article', 'blockquote'].includes(tag) ||
+      /^h[1-6]$/.test(tag)
+    ) {
+      appendTextLine(element.textContent);
+      appendBlankLine();
+      return;
+    }
+
+    Array.from(element.childNodes).forEach(traverse);
+  };
+
+  Array.from(container.childNodes).forEach(traverse);
+
+  while (lines.length && lines[lines.length - 1] === '') {
+    lines.pop();
+  }
+
+  const result = lines.join('\n').trim();
+  return result || container.textContent?.replace(/\s+/g, ' ').trim() || '';
+};
+
+const exportPagesAsPdf = async (worldName: string, pages: PageNode[]) => {
+  if (!pages.length) {
+    return;
+  }
+
+  const { jsPDF } = await import('jspdf');
+  const doc = new jsPDF({ unit: 'pt', format: 'letter' });
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const pageHeight = doc.internal.pageSize.getHeight();
+  const margin = 60;
+  const wrapWidth = pageWidth - margin * 2;
+  const lineHeight = 18;
+
+  pages.forEach((page, pageIndex) => {
+    if (pageIndex > 0) {
+      doc.addPage();
+    }
+
+    let cursorY = margin;
+
+    const title = page.title?.trim() || 'Untitled page';
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(20);
+    doc.text(title, margin, cursorY);
+
+    cursorY += 30;
+
+    const plainText = convertHtmlToPlainText(page.content);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(12);
+
+    if (!plainText) {
+      doc.setTextColor(120);
+      doc.text('(No content)', margin, cursorY);
+      doc.setTextColor(0);
+      return;
+    }
+
+    const paragraphs = plainText.split(/\n{2,}/).map((block) => block.trim()).filter(Boolean);
+
+    paragraphs.forEach((paragraph, paragraphIndex) => {
+      const lines = doc.splitTextToSize(paragraph, wrapWidth);
+
+      lines.forEach((line) => {
+        if (cursorY > pageHeight - margin) {
+          doc.addPage();
+          cursorY = margin;
+          doc.setFont('helvetica', 'normal');
+          doc.setFontSize(12);
+        }
+
+        doc.text(line, margin, cursorY);
+        cursorY += lineHeight;
+      });
+
+      if (paragraphIndex < paragraphs.length - 1) {
+        cursorY += lineHeight / 1.5;
+      }
+    });
+  });
+
+  doc.setProperties({
+    title: `${worldName} – World Bible`,
+    subject: 'World Builder export',
+  });
+
+  const timestamp = new Date();
+  const safeWorldName = worldName
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 60);
+  const fileBase = safeWorldName || 'world';
+  const fileName = `${fileBase}-${timestamp.toISOString().slice(0, 10)}.pdf`;
+
+  doc.save(fileName);
+};
 
 const normalizePageTree = (nodes: PageNode[] | undefined): PageNode[] =>
   (nodes ?? []).map((node) => ({
@@ -671,6 +860,7 @@ export default function Home() {
   const [textColor, setTextColor] = useState('#e2e8f0');
   const [isLightMode, setIsLightMode] = useState(false);
   const [isExportMenuOpen, setIsExportMenuOpen] = useState(false);
+  const [isExportingPdf, setIsExportingPdf] = useState(false);
   const [selectedExportPageIds, setSelectedExportPageIds] = useState<string[]>([]);
   const [collapsedPageIds, setCollapsedPageIds] = useState<string[]>([]);
   const [saveStatus, setSaveStatus] = useState<'saved' | 'saving' | 'offline' | 'syncing'>('syncing');
@@ -1700,17 +1890,98 @@ export default function Home() {
     handleUpdatePageContent(currentPageId, sanitized);
   };
 
+  const applyListCommand = (listType: 'unordered' | 'ordered') => {
+    if (!editorRef.current || typeof document === 'undefined' || typeof window === 'undefined') {
+      return;
+    }
+
+    const command = listType === 'unordered' ? 'insertUnorderedList' : 'insertOrderedList';
+
+    editorRef.current.focus();
+
+    const selection = window.getSelection();
+    const beforeHtml = editorRef.current.innerHTML;
+
+    document.execCommand(command, false);
+
+    window.setTimeout(() => {
+      if (!editorRef.current) {
+        return;
+      }
+
+      if (editorRef.current.innerHTML !== beforeHtml) {
+        handleEditorInput();
+        return;
+      }
+
+      const activeSelection = window.getSelection();
+      if (!activeSelection || activeSelection.rangeCount === 0) {
+        handleEditorInput();
+        return;
+      }
+
+      const range = activeSelection.getRangeAt(0);
+      if (!editorRef.current.contains(range.commonAncestorContainer)) {
+        handleEditorInput();
+        return;
+      }
+
+      const listElement = document.createElement(listType === 'unordered' ? 'ul' : 'ol');
+      const listItem = document.createElement('li');
+      const selectedText = range.toString().trim();
+
+      if (selectedText) {
+        listItem.textContent = selectedText;
+        range.deleteContents();
+      } else {
+        listItem.appendChild(document.createElement('br'));
+      }
+
+      listElement.appendChild(listItem);
+      range.insertNode(listElement);
+
+      const caretRange = document.createRange();
+      if (listItem.firstChild) {
+        if (listItem.firstChild.nodeType === Node.TEXT_NODE) {
+          caretRange.setStart(listItem.firstChild, (listItem.firstChild.textContent ?? '').length);
+        } else {
+          caretRange.setStart(listItem.firstChild, 0);
+        }
+      } else {
+        caretRange.setStart(listItem, 0);
+      }
+
+      caretRange.collapse(true);
+      activeSelection.removeAllRanges();
+      activeSelection.addRange(caretRange);
+
+      handleEditorInput();
+    }, 0);
+  };
+
   const handleToolbarAction = (command: string, value?: string) => {
     if (!editorRef.current) return;
 
     editorRef.current.focus();
 
-    if (typeof document !== 'undefined') {
-      document.execCommand(command, false, value ?? '');
-      window.setTimeout(() => {
-        handleEditorInput();
-      }, 0);
+    if (typeof document === 'undefined' || typeof window === 'undefined') {
+      return;
     }
+
+    if (command === 'insertUnorderedList') {
+      applyListCommand('unordered');
+      return;
+    }
+
+    if (command === 'insertOrderedList') {
+      applyListCommand('ordered');
+      return;
+    }
+
+    document.execCommand(command, false, value ?? '');
+    window.setTimeout(() => {
+      handleEditorInput();
+    }, 0);
   };
 
   const handleManualSync = async () => {
@@ -1728,10 +1999,15 @@ export default function Home() {
     );
   };
 
-  const handleExportPdf = () => {
-    const rootPages = activeWorld?.pages ?? [];
+  const handleExportPdf = async () => {
+    if (!activeWorld) {
+      return;
+    }
+
+    const rootPages = activeWorld.pages ?? [];
     const selectedSet = new Set(selectedExportPageIds);
-    const selectedPages = rootPages.filter((page) => selectedSet.has(page.id));
+    const orderedPages = flattenPages(rootPages);
+    const selectedPages = orderedPages.filter((page) => selectedSet.has(page.id));
 
     if (!selectedPages.length) {
       if (typeof window !== 'undefined') {
@@ -1740,13 +2016,22 @@ export default function Home() {
       return;
     }
 
-    setIsExportMenuOpen(false);
+    if (isExportingPdf) {
+      return;
+    }
 
-    if (typeof window !== 'undefined') {
-      const titles = selectedPages.map((page) => page.title || 'Untitled page').join(', ');
-      window.setTimeout(() => {
-        window.alert(`Preparing a PDF with: ${titles}. It will download shortly.`);
-      }, 150);
+    setIsExportingPdf(true);
+
+    try {
+      await exportPagesAsPdf(activeWorld.name || 'World', selectedPages);
+    } catch (error) {
+      console.error('Failed to export PDF', error);
+      if (typeof window !== 'undefined') {
+        window.alert('Unable to export the PDF. Please try again.');
+      }
+    } finally {
+      setIsExportingPdf(false);
+      setIsExportMenuOpen(false);
     }
   };
 
@@ -2183,12 +2468,11 @@ export default function Home() {
         ),
       },
       {
-        label: 'Quote',
-        command: 'formatBlock',
-        value: 'blockquote',
+        label: 'Horizontal rule',
+        command: 'insertHorizontalRule',
         icon: (
-          <svg aria-hidden="true" viewBox="0 0 20 20" className="h-4 w-4" fill="currentColor">
-            <path d="M6.5 5A2.5 2.5 0 0 0 4 7.5v5A2.5 2.5 0 0 0 6.5 15H7v-3H5.5v-1A1.5 1.5 0 0 1 7 9.5V5h-.5Zm7 0A2.5 2.5 0 0 0 11 7.5v5A2.5 2.5 0 0 0 13.5 15H14v-3h-1.5v-1A1.5 1.5 0 0 1 14 9.5V5h-.5Z" />
+          <svg aria-hidden="true" viewBox="0 0 20 20" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.6">
+            <path strokeLinecap="round" d="M4 10h12" />
           </svg>
         ),
       },
@@ -2493,11 +2777,14 @@ export default function Home() {
                             </button>
                             <button
                               type="button"
-                              onClick={handleExportPdf}
+                              onClick={() => {
+                                void handleExportPdf();
+                              }}
                               className={exportDownloadClass}
-                              disabled={!selectedExportCount}
+                              disabled={!selectedExportCount || isExportingPdf}
+                              aria-busy={isExportingPdf}
                             >
-                              Download
+                              {isExportingPdf ? 'Preparing…' : 'Download'}
                             </button>
                           </div>
                         </div>
