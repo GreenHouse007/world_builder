@@ -3,8 +3,9 @@ import type { Document as MongoDocument } from 'mongodb';
 import { getDatabase } from '../db/mongodb';
 import type { ActivityEntry, PageNode, World, WorldCollaborator } from '../models/worldTypes';
 import { ACTIVITY_LIMIT } from '../models/worldTypes';
+import { isDate } from '../utils/isDate';
 
-type StoredActivity = MongoDocument & ActivityEntry & { timestamp: Date | string };
+type StoredActivity = MongoDocument & Omit<ActivityEntry, 'timestamp'> & { timestamp: Date | string };
 
 type StoredWorld = MongoDocument & {
   _id: string;
@@ -31,30 +32,28 @@ const mapWorld = (document: StoredWorld): World => ({
   activity: Array.isArray(document.activity)
     ? document.activity.map((entry) => ({
         ...entry,
-        timestamp:
-          entry.timestamp && entry.timestamp instanceof Date
-            ? entry.timestamp.toISOString()
-            : `${entry.timestamp}`,
+        timestamp: isDate(entry.timestamp) ? entry.timestamp.toISOString() : `${entry.timestamp}`,
       }))
     : [],
-  createdAt:
-    document.createdAt && document.createdAt instanceof Date
-      ? document.createdAt.toISOString()
-      : new Date(document.createdAt).toISOString(),
-  updatedAt:
-    document.updatedAt && document.updatedAt instanceof Date
-      ? document.updatedAt.toISOString()
-      : new Date(document.updatedAt).toISOString(),
+  createdAt: isDate(document.createdAt)
+    ? document.createdAt.toISOString()
+    : new Date(document.createdAt).toISOString(),
+  updatedAt: isDate(document.updatedAt)
+    ? document.updatedAt.toISOString()
+    : new Date(document.updatedAt).toISOString(),
 });
 
 const normalizeActivityForStorage = (activity: ActivityEntry[]): StoredActivity[] => {
   const now = new Date();
   return activity
     .slice(0, ACTIVITY_LIMIT)
-    .map((entry) => ({
-      ...entry,
-      timestamp: entry.timestamp ? new Date(entry.timestamp) : now,
-    }));
+    .map((entry) => {
+      const storedEntry: StoredActivity = {
+        ...entry,
+        timestamp: entry.timestamp ? new Date(entry.timestamp) : now,
+      };
+      return storedEntry;
+    });
 };
 
 export async function listWorldsByOwner(ownerId: string): Promise<World[]> {

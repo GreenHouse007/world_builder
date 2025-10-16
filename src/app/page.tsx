@@ -1,7 +1,7 @@
 'use client';
 
 import Image from 'next/image';
-import type { ChangeEvent, DragEvent, FormEvent, KeyboardEvent } from 'react';
+import type { ChangeEvent, DragEvent, FormEvent, KeyboardEvent, MouseEvent, PointerEvent } from 'react';
 import type { ReactElement } from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { User } from 'firebase/auth';
@@ -602,13 +602,13 @@ function PageTree({
                   : 'text-slate-300 hover:border-white/10 hover:bg-white/5 hover:text-slate-100'
               } ${isDragging ? 'opacity-70 ring-2 ring-indigo-400/50' : ''}`}
               draggable
-              onDragStart={(event) => onDragStart(node.id, event)}
-              onDragOver={(event) => {
+              onDragStart={(event: DragEvent<HTMLDivElement>) => onDragStart(node.id, event)}
+              onDragOver={(event: DragEvent<HTMLDivElement>) => {
                 event.preventDefault();
                 event.dataTransfer.dropEffect = 'move';
                 event.stopPropagation();
               }}
-              onDrop={(event) => {
+              onDrop={(event: DragEvent<HTMLDivElement>) => {
                 event.preventDefault();
                 event.stopPropagation();
                 onDrop(node.id);
@@ -619,12 +619,12 @@ function PageTree({
               {hasChildren ? (
                 <button
                   type="button"
-                  onClick={(event) => {
+                  onClick={(event: MouseEvent<HTMLButtonElement>) => {
                     event.stopPropagation();
                     onToggleCollapse(node.id);
                   }}
-                  onMouseDown={(event) => event.stopPropagation()}
-                  onPointerDown={(event) => event.stopPropagation()}
+                  onMouseDown={(event: MouseEvent<HTMLButtonElement>) => event.stopPropagation()}
+                  onPointerDown={(event: PointerEvent<HTMLButtonElement>) => event.stopPropagation()}
                   className={`inline-flex h-6 w-6 items-center justify-center rounded-lg border border-white/10 text-xs transition ${
                     isCollapsed ? 'text-slate-400 hover:text-slate-200' : 'text-indigo-200/80 hover:text-indigo-100'
                   }`}
@@ -676,7 +676,7 @@ function PageTree({
 
               <button
                 type="button"
-                onClick={(event) => {
+                onClick={(event: MouseEvent<HTMLButtonElement>) => {
                   event.stopPropagation();
                   if (isMenuOpen) {
                     onCloseActionMenu();
@@ -803,8 +803,10 @@ function PageTree({
               <div className="absolute left-0 top-0 z-30 w-full rounded-xl border border-indigo-300/60 bg-slate-950/95 p-2 shadow-2xl">
                 <input
                   value={pageTitleDraft}
-                  onChange={(event) => onRenameChange(event.target.value)}
-                  onKeyDown={(event) => {
+                  onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                    onRenameChange(event.currentTarget.value)
+                  }
+                  onKeyDown={(event: KeyboardEvent<HTMLInputElement>) => {
                     if (event.key === 'Enter') {
                       event.preventDefault();
                       onRenameCommit();
@@ -1332,7 +1334,7 @@ export default function Home() {
   useEffect(() => {
     if (!isExportMenuOpen) return;
 
-    const handleClickOutside = (event: MouseEvent) => {
+    const handleClickOutside = (event: globalThis.MouseEvent) => {
       if (!exportMenuRef.current) return;
       if (event.target instanceof Node && !exportMenuRef.current.contains(event.target)) {
         setIsExportMenuOpen(false);
@@ -2630,7 +2632,9 @@ export default function Home() {
                   Size
                   <select
                     value={textSize}
-                    onChange={(event) => handleTextSizeSelect(event.target.value)}
+                    onChange={(event: ChangeEvent<HTMLSelectElement>) =>
+                      handleTextSizeSelect(event.currentTarget.value)
+                    }
                     className={selectClass}
                   >
                     {sizeOptions.map((option) => (
@@ -2691,9 +2695,10 @@ export default function Home() {
             <input
               className={titleInputClasses}
               value={editorTitle}
-              onChange={(event) => {
-                setEditorTitle(event.target.value);
-                handleUpdatePageTitle(currentPageId, event.target.value);
+              onChange={(event: ChangeEvent<HTMLInputElement>) => {
+                const { value } = event.currentTarget;
+                setEditorTitle(value);
+                handleUpdatePageTitle(currentPageId, value);
               }}
               placeholder="Untitled page"
             />
@@ -2929,8 +2934,8 @@ export default function Home() {
                         className="w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-slate-100 placeholder:text-slate-500 focus:border-indigo-400/50 focus:outline-none focus:ring-2 focus:ring-indigo-400/30"
                         placeholder="How should we greet you?"
                         value={authName}
-                        onChange={(event) => {
-                          setAuthName(event.target.value);
+                        onChange={(event: ChangeEvent<HTMLInputElement>) => {
+                          setAuthName(event.currentTarget.value);
                           setAuthError(null);
                         }}
                         disabled={authDisabled}
@@ -2946,8 +2951,8 @@ export default function Home() {
                       type="email"
                       required
                       value={authEmail}
-                      onChange={(event) => {
-                        setAuthEmail(event.target.value);
+                      onChange={(event: ChangeEvent<HTMLInputElement>) => {
+                        setAuthEmail(event.currentTarget.value);
                         setAuthError(null);
                       }}
                       disabled={authDisabled}
@@ -2962,8 +2967,8 @@ export default function Home() {
                       type="password"
                       required
                       value={authPassword}
-                      onChange={(event) => {
-                        setAuthPassword(event.target.value);
+                      onChange={(event: ChangeEvent<HTMLInputElement>) => {
+                        setAuthPassword(event.currentTarget.value);
                         setAuthError(null);
                       }}
                       disabled={authDisabled}
