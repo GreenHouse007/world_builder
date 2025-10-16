@@ -1,7 +1,8 @@
 'use client';
 
 import Image from 'next/image';
-import type { ChangeEvent, DragEvent, FormEvent, KeyboardEvent, MouseEvent, PointerEvent } from 'react';
+import type React from 'react';
+import type { ChangeEvent, FormEvent, KeyboardEvent, MouseEvent, PointerEvent } from 'react';
 import type { ReactElement } from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { User } from 'firebase/auth';
@@ -548,7 +549,7 @@ type PageTreeProps = {
   actionMenuId: string | null;
   onOpenActionMenu: (id: string) => void;
   onCloseActionMenu: () => void;
-  onDragStart: (id: string, event: DragEvent<HTMLDivElement>) => void;
+  onDragStart: (id: string, event: React.DragEvent<HTMLDivElement>) => void;
   onDragEnd: () => void;
   onDrop: (targetId: string) => void;
   draggedPageId: string | null;
@@ -602,13 +603,13 @@ function PageTree({
                   : 'text-slate-300 hover:border-white/10 hover:bg-white/5 hover:text-slate-100'
               } ${isDragging ? 'opacity-70 ring-2 ring-indigo-400/50' : ''}`}
               draggable
-              onDragStart={(event: DragEvent<HTMLDivElement>) => onDragStart(node.id, event)}
-              onDragOver={(event: DragEvent<HTMLDivElement>) => {
+              onDragStart={(event: React.DragEvent<HTMLDivElement>) => onDragStart(node.id, event)}
+              onDragOver={(event: React.DragEvent<HTMLDivElement>) => {
                 event.preventDefault();
                 event.dataTransfer.dropEffect = 'move';
                 event.stopPropagation();
               }}
-              onDrop={(event: DragEvent<HTMLDivElement>) => {
+              onDrop={(event: React.DragEvent<HTMLDivElement>) => {
                 event.preventDefault();
                 event.stopPropagation();
                 onDrop(node.id);
@@ -1792,7 +1793,7 @@ export default function Home() {
     setPageTitleDraft('');
   };
 
-  const handlePageDragStart = (pageId: string, event: DragEvent<HTMLDivElement>) => {
+  const handlePageDragStart = (pageId: string, event: React.DragEvent<HTMLDivElement>) => {
     setDraggedPageId(pageId);
     setPageActionMenuId(null);
     setEditingPageId(null);
