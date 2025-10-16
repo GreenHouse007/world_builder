@@ -348,7 +348,7 @@ const exportPagesAsPdf = async (worldName: string, pages: PageNode[]) => {
     paragraphs.forEach((paragraph, paragraphIndex) => {
       const lines = doc.splitTextToSize(paragraph, wrapWidth);
 
-      lines.forEach((line) => {
+      lines.forEach((line: string) => {
         if (cursorY > pageHeight - margin) {
           doc.addPage();
           cursorY = margin;
