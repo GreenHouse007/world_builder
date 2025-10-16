@@ -3,17 +3,26 @@ import type { World } from '@/lib/models/world';
 import { getUserIdFromRequest } from '@/lib/server/userContext';
 import { createWorldForUser, getWorldsForUser } from '@/lib/server/worldService';
 
+function normalizeDateLike(value: unknown) {
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+
+  if (typeof value === 'string') {
+    return value;
+  }
+
+  return undefined;
+}
+
 function serializeWorld(world: World) {
+  const createdAt = normalizeDateLike(world.createdAt as unknown);
+  const updatedAt = normalizeDateLike(world.updatedAt as unknown);
+
   return {
     ...world,
-    createdAt:
-      world.createdAt && world.createdAt instanceof Date
-        ? world.createdAt.toISOString()
-        : world.createdAt,
-    updatedAt:
-      world.updatedAt && world.updatedAt instanceof Date
-        ? world.updatedAt.toISOString()
-        : world.updatedAt,
+    createdAt: createdAt ?? world.createdAt,
+    updatedAt: updatedAt ?? world.updatedAt,
   };
 }
 

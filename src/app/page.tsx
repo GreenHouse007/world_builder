@@ -1899,7 +1899,6 @@ export default function Home() {
 
     editorRef.current.focus();
 
-    const selection = window.getSelection();
     const beforeHtml = editorRef.current.innerHTML;
 
     document.execCommand(command, false);
