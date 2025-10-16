@@ -1,40 +1,48 @@
 declare module 'mongodb' {
   export type Document = Record<string, unknown>;
-  export type Filter = Record<string, unknown>;
-  export type UpdateFilter = Record<string, unknown>;
 
-  export class ObjectId {
-    constructor(id?: string);
-    toString(): string;
-  }
+  export type Filter<TSchema> = Partial<{ [K in keyof TSchema]: TSchema[K] }>;
+  export type UpdateFilter<TSchema> = {
+    $set?: Partial<TSchema>;
+    $setOnInsert?: Partial<TSchema>;
+  };
 
-  export interface FindCursor<TSchema extends Document = Document> {
+  export interface FindCursor<TSchema> {
     sort(sort: Record<string, 1 | -1>): FindCursor<TSchema>;
     toArray(): Promise<TSchema[]>;
   }
 
-  export interface Collection<TSchema extends Document = Document> {
-    find(filter: Filter): FindCursor<TSchema>;
-    findOne(filter: Filter): Promise<TSchema | null>;
+  export interface DeleteResult {
+    deletedCount?: number;
+  }
+
+  export interface Collection<TSchema = Document> {
+    find(filter: Filter<TSchema>): FindCursor<TSchema>;
+    findOne(filter: Filter<TSchema>): Promise<TSchema | null>;
     findOneAndUpdate(
-      filter: Filter,
-      update: UpdateFilter,
-      options?: { returnDocument?: 'before' | 'after'; upsert?: boolean }
+      filter: Filter<TSchema>,
+      update: UpdateFilter<TSchema>,
+      options?: { returnDocument?: 'before' | 'after'; upsert?: boolean },
     ): Promise<{ value: TSchema | null }>;
-    insertOne(doc: TSchema): Promise<{ insertedId: ObjectId }>;
-    updateOne(filter: Filter, update: UpdateFilter): Promise<unknown>;
-    deleteOne(filter: Filter): Promise<{ deletedCount?: number }>;
-    deleteMany(filter: Filter): Promise<{ deletedCount?: number }>;
+    insertOne(doc: TSchema): Promise<{ insertedId: string }>;
+    updateOne(filter: Filter<TSchema>, update: UpdateFilter<TSchema>): Promise<unknown>;
+    deleteOne(filter: Filter<TSchema>): Promise<DeleteResult>;
+    deleteMany(filter: Filter<TSchema>): Promise<DeleteResult>;
     createIndex(indexSpec: Record<string, 1 | -1>): Promise<string>;
   }
 
   export interface Db {
-    collection<TSchema extends Document = Document>(name: string): Collection<TSchema>;
+    collection<TSchema = Document>(name: string): Collection<TSchema>;
   }
 
   export class MongoClient {
     constructor(uri: string, options?: Record<string, unknown>);
     connect(): Promise<MongoClient>;
-    db(name: string): Db;
+    db(dbName?: string): Db;
+  }
+
+  export class ObjectId {
+    constructor(id?: string);
+    toString(): string;
   }
 }

@@ -1,20 +1,22 @@
 declare module 'react' {
-  export as namespace React;
+  export type Key = string | number | null;
 
-  export type ReactNode = unknown;
-  export interface ReactElement<P = unknown, T extends string | React.JSXElementConstructor<any> = string | React.JSXElementConstructor<any>> {
+  export interface ReactElement<P = any, T extends string | JSXElementConstructor<any> = string | JSXElementConstructor<any>> {
     readonly type: T;
     readonly props: P;
-    readonly key: string | number | null;
+    readonly key: Key;
   }
 
-  export namespace React {
-    type ReactNode = import('react').ReactNode;
-    interface ReactElement<P = unknown, T extends string | React.JSXElementConstructor<any> = string | React.JSXElementConstructor<any>> {
-      readonly type: T;
-      readonly props: P;
-      readonly key: string | number | null;
-    }
+  export interface JSXElementConstructor<P> {
+    (props: P): ReactElement | null;
+  }
+
+  export interface ReactNodeArray extends Array<ReactNode> {}
+
+  export type ReactNode = ReactElement | string | number | boolean | null | undefined | ReactNodeArray;
+
+  export interface FC<P = {}> {
+    (props: P & { children?: ReactNode }): ReactElement | null;
   }
 
   export interface MutableRefObject<T> {
@@ -32,16 +34,12 @@ declare module 'react' {
   export function useState<S = undefined>(): [S | undefined, Dispatch<SetStateAction<S | undefined>>];
   export function useEffect(effect: () => void | (() => void), deps?: ReadonlyArray<unknown>): void;
   export function useMemo<T>(factory: () => T, deps: ReadonlyArray<unknown>): T;
-  export function useCallback<T extends (...args: never[]) => unknown>(callback: T, deps: ReadonlyArray<unknown>): T;
+  export function useCallback<T extends (...args: any[]) => any>(callback: T, deps: ReadonlyArray<unknown>): T;
   export function useRef<T>(initialValue: T): MutableRefObject<T>;
   export function useRef<T>(initialValue: T | null): MutableRefObject<T | null>;
   export function useRef<T = undefined>(): MutableRefObject<T | undefined>;
 
   export type DependencyList = ReadonlyArray<unknown>;
-
-  export interface JSXElementConstructor<P> {
-    (props: P): ReactElement | null;
-  }
 
   export interface SyntheticEvent<T = EventTarget, E = Event> {
     nativeEvent: E;
@@ -56,59 +54,36 @@ declare module 'react' {
   }
 
   export interface ChangeEvent<T = Element> extends SyntheticEvent<T> {}
-  export interface DragEvent<T = Element> extends BaseSyntheticEvent<globalThis.DragEvent, T, T> {
-    dataTransfer: DataTransfer;
-  }
   export interface FormEvent<T = Element> extends SyntheticEvent<T> {}
   export interface KeyboardEvent<T = Element> extends SyntheticEvent<T, globalThis.KeyboardEvent> {
     key: string;
   }
+  export interface DragEvent<T = Element> extends BaseSyntheticEvent<globalThis.DragEvent, T, T> {
+    dataTransfer: DataTransfer;
+  }
   export interface MouseEvent<T = Element> extends SyntheticEvent<T, globalThis.MouseEvent> {}
   export interface PointerEvent<T = Element> extends SyntheticEvent<T, globalThis.PointerEvent> {}
-
-  export interface Attributes {
-    key?: string | number | null | undefined;
-  }
-
-  export interface ClassAttributes<T> extends Attributes {
-    ref?: MutableRefObject<T | null> | ((instance: T | null) => void) | null;
-  }
-
-  export interface HTMLAttributes<T> extends Attributes {
-    [key: string]: unknown;
-  }
-
-  export interface DetailedHTMLProps<E extends HTMLAttributes<T>, T> extends E {}
-
-  export interface FC<P = {}> {
-    (props: P & { children?: ReactNode }): ReactElement | null;
-  }
-
-  export interface Context<T> {
-    Provider: FC<{ value: T }>;
-    Consumer: FC<{ children: (value: T) => ReactNode }>;
-  }
-
-  export const Fragment: unique symbol;
 
   export namespace JSX {
     interface Element extends ReactElement {}
     interface ElementClass {
-      render: () => ReactNode;
+      render: () => unknown;
     }
     interface ElementAttributesProperty {
       props: Record<string, unknown>;
     }
     interface ElementChildrenAttribute {
-      children: Record<string, unknown>;
+      children: ReactNode;
     }
     interface IntrinsicElements {
       [elemName: string]: any;
     }
   }
 
+  export const Fragment: unique symbol;
+
   const React: {
-    createElement: (...args: unknown[]) => ReactElement;
+    createElement: (type: any, props: any, ...children: ReactNode[]) => ReactElement;
   };
 
   export default React;
