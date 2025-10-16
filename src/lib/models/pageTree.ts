@@ -24,7 +24,11 @@ export const createPage = (title: string, options?: Partial<PageNode>): PageNode
   children: options?.children ? clonePageTree(options.children) : [],
 });
 
-export const findPageInTree = (nodes: PageNode[], id: string): PageNode | null => {
+export const findPageInTree = (nodes: PageNode[], id: string | null | undefined): PageNode | null => {
+  if (!id) {
+    return null;
+  }
+
   for (const node of nodes) {
     if (node.id === id) {
       return node;
