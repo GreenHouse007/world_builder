@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import { Inter } from "next/font/google";
-import type { ReactNode } from "react";
+import { ReactNode } from "react";
 import "./globals.css";
 
 const inter = Inter({
@@ -13,11 +13,7 @@ export const metadata: Metadata = {
     "Draft immersive universes, document lore, and organize story bibles with Enfield's elegant writing workspace.",
 };
 
-export default function RootLayout({
-  children,
-}: Readonly<{
-  children: ReactNode;
-}>) {
+export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="en">
       <body className={`${inter.className} antialiased`}>
