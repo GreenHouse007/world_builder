@@ -3,18 +3,17 @@ import type { DocumentNode } from '@/lib/models/document';
 import { getUserIdFromRequest } from '@/lib/server/userContext';
 import { ensureWorldAccess } from '@/lib/server/worldService';
 import { getDocument, removeDocument, updateDocumentContent } from '@/lib/server/documentService';
+import { isDate } from '@/lib/utils/isDate';
 
 function serializeDocument(document: DocumentNode) {
   return {
     ...document,
-    createdAt:
-      document.createdAt && document.createdAt instanceof Date
-        ? document.createdAt.toISOString()
-        : document.createdAt,
-    updatedAt:
-      document.updatedAt && document.updatedAt instanceof Date
-        ? document.updatedAt.toISOString()
-        : document.updatedAt,
+    createdAt: isDate(document.createdAt)
+      ? document.createdAt.toISOString()
+      : document.createdAt,
+    updatedAt: isDate(document.updatedAt)
+      ? document.updatedAt.toISOString()
+      : document.updatedAt,
   };
 }
 
